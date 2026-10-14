@@ -1,0 +1,2 @@
+export async function api(url,options={}){const r=await fetch(url,{headers:{'Content-Type':'application/json',...(options.headers||{})},...options});if(!r.ok){let m=`Request failed (${r.status})`;try{m=(await r.json()).error||m}catch{}throw new Error(m)}if(r.status===204)return null;return r.json()}
+export const money=(n=0)=>new Intl.NumberFormat('en-CA',{style:'currency',currency:'CAD'}).format(n);export const pct=(n=0)=>`${Number(n).toFixed(1)}%`;export const dateFmt=d=>new Intl.DateTimeFormat('en-CA',{month:'short',day:'numeric',year:'numeric'}).format(new Date(d));
