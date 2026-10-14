@@ -1,0 +1,11 @@
+import mongoose from 'mongoose';
+const {Schema}=mongoose;
+const Money={type:Number,default:0};
+const LineSchema=new Schema({shopifyLineId:String,productId:String,variantId:String,title:String,variantTitle:String,sku:String,quantity:Number,gross:Money,discount:Money,net:Money,unitCost:Money,cogs:Money,costSource:{type:String,default:'catalog'}},{_id:false});
+const OrderSchema=new Schema({shopifyId:{type:String,unique:true,sparse:true,index:true},orderNumber:{type:String,index:true},name:String,source:{type:String,enum:['shopify','manual'],default:'shopify',index:true},createdAtShopify:{type:Date,index:true},currency:{type:String,default:'CAD'},financialStatus:String,fulfillmentStatus:String,grossSales:Money,discounts:Money,returns:Money,netSales:Money,shippingRevenue:Money,taxes:Money,totalCollected:Money,cogs:Money,shippingCost:Money,paymentFees:Money,materialCost:Money,otherVariableCost:Money,lines:[LineSchema],notes:String,raw:Schema.Types.Mixed,lastSyncedAt:Date},{timestamps:true});
+const CostSchema=new Schema({variantId:{type:String,index:true},sku:{type:String,index:true},title:String,unitCost:Money,effectiveFrom:{type:Date,default:Date.now,index:true},notes:String},{timestamps:true});
+const ExpenseSchema=new Schema({date:{type:Date,index:true,required:true},vendor:String,category:{type:String,index:true},description:String,amount:{type:Number,required:true},tax:Money,reference:String,notes:String,recurring:{type:Boolean,default:false},source:{type:String,default:'manual'}},{timestamps:true});
+const PurchaseSchema=new Schema({date:{type:Date,index:true,required:true},vendor:String,poNumber:String,status:{type:String,default:'paid'},subtotal:Money,shipping:Money,duties:Money,tax:Money,total:Money,notes:String},{timestamps:true});
+const SettingSchema=new Schema({key:{type:String,unique:true},value:Schema.Types.Mixed},{timestamps:true});
+const SessionSchema=new Schema({shop:{type:String,unique:true},accessToken:String,scope:String,installedAt:Date},{timestamps:true});
+export const Order=mongoose.model('Order',OrderSchema);export const Cost=mongoose.model('Cost',CostSchema);export const Expense=mongoose.model('Expense',ExpenseSchema);export const Purchase=mongoose.model('Purchase',PurchaseSchema);export const Setting=mongoose.model('Setting',SettingSchema);export const Session=mongoose.model('Session',SessionSchema);
