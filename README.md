@@ -40,3 +40,13 @@ Purchase orders are tracked as cash/procurement records but are not automaticall
 ## Webhooks
 
 The server exposes `POST /webhooks/orders` with Shopify HMAC validation. Register order create/update/refund webhooks against that endpoint after installation. Manual `Sync Shopify` imports the accessible order history and upserts it safely.
+
+## Inventory catalog
+
+`/inventory` lists one row per Shopify variant, including product image, title, SKU, price, Shopify unit cost, available stock, gross margin, and potential gross profit for all available units. The cards summarize the entire catalog, including drafts and archived products, independently of table filters/pagination. All amounts use the shop currency. Missing costs are flagged and excluded from known-cost profit calculations; untracked stock is excluded from valuation. Negative available quantities are displayed but valued at zero. Inventory costs use Shopify's current unit cost, while the existing effective-dated cost overrides remain specific to order COGS.
+
+A complete paginated catalog sync runs on server startup, after OAuth, and every five minutes while the service runs. New products, price/cost/stock/image changes, and product deletions are reconciled automatically. The Inventory page refreshes its saved data every 30 seconds. Use **Sync products** for an immediate catalog refresh or **Sync Shopify** for catalog plus orders. No write access to Shopify or separate webhook registration is required for catalog sync. The last successful sync and any sync failure are visible on the page. Imported orders remain independent of catalog deletions.
+
+Inventory value = selling price × max(available quantity, 0). Inventory cost = Shopify unit cost × max(available quantity, 0). Gross margin = (price − unit cost) ÷ price × 100. Total potential gross profit = (price − unit cost) × max(available quantity, 0), before fees, shipping, discounts and tax.
+
+Run `npm test` for inventory valuation, missing-cost handling, cursor pagination, concurrent sync deduplication, safe retry, and deletion reconciliation tests.
