@@ -39,9 +39,11 @@ export default function Inventory() {
       <button className="secondary" onClick={sync} disabled={busy}><RefreshCw size={16} className={busy ? 'spin' : ''}/>{busy ? 'Syncing…' : 'Sync products'}</button>
     </header>
     <div className="inventory-sync"><span className="inventory-sync-dot"/>
-      <span>Automatic sync every {data?.refreshMinutes || 5} minutes · {state?.lastSyncedAt ? `Last synced ${new Date(state.lastSyncedAt).toLocaleString()}` : 'Waiting for first import'}</span>
+      <span>{data?.webhooks?.active ? 'Live Shopify updates · ' : 'Shopify webhooks connecting · '}Hourly backup · {data?.webhooks?.lastProcessedAt ? `Last live update ${new Date(data.webhooks.lastProcessedAt).toLocaleString()}` : state?.lastSyncedAt ? `Last full sync ${new Date(state.lastSyncedAt).toLocaleString()}` : 'Waiting for first import'}</span>
       <span>{currency} · All product statuses</span>
     </div>
+    {(data?.webhooks?.error || data?.webhooks?.processingError) && <div className="notice" role="alert"><div><strong>Live Shopify updates need attention</strong><span>{data.webhooks.error || data.webhooks.processingError} · The hourly backup sync is still enabled.</span></div></div>}
+    {data?.pendingWebhooks > 0 && <div className="small">Processing {data.pendingWebhooks} Shopify update(s)…</div>}
     {saved && <div className="inventory-note inventory-saved" role="status">{saved}</div>}
     {data?.editing && !data.editing.allowed && <ShopifyEditingAccess access={data.editing} onChecked={editing => setData(previous => ({...previous,editing}))}/>}
     {(error || state?.error) && <div className="notice" role="alert"><AlertCircle size={18}/><div><strong>Sync needs attention</strong><span>{error || state.error}</span></div><button className="secondary" disabled={busy} onClick={sync}>Retry sync</button></div>}
@@ -49,7 +51,7 @@ export default function Inventory() {
       <Stat label="Total inventory value" value={money(totals?.inventoryValue)} sub="Selling price × available quantity"/>
       <Stat label={partial ? 'Known inventory cost' : 'Total inventory cost'} value={money(totals?.inventoryCost)} sub={partial ? 'Incomplete — some stocked items have no cost' : 'Shopify unit cost × available quantity'}/>
       <Stat label={partial ? 'Known potential gross profit' : 'Potential gross profit'} value={money(totals?.totalProfit)} sub={totals?.margin == null ? 'Margin unavailable' : `${pct(totals.margin)} gross margin${partial ? ' · known costs only' : ''}`} tone={totals?.totalProfit < 0 ? 'negative' : 'positive'}/>
-      <Stat label="Available units" value={totals ? totals.quantity.toLocaleString() : '—'} sub={`${state?.products ?? '—'} products · ${totals?.variants ?? '—'} variants`}/>
+      <Stat label="Available units" value={totals ? totals.quantity.toLocaleString() : '—'} sub={`${totals?.products ?? state?.products ?? '—'} products · ${totals?.variants ?? '—'} variants`}/>
     </section>
     {(totals?.missingCosts > 0 || totals?.untracked > 0) && <div className="inventory-note">
       {totals.missingCosts > 0 && <span>{totals.missingCosts} variant(s) have no Shopify cost. Their profit is unavailable; add a cost in Shopify to include them in cost and profit totals.</span>}
