@@ -1,12 +1,13 @@
 export const CATALOG_INTERVAL_MS = 5 * 60 * 1000;
+export const CATALOG_FIELDS = `id title sku price inventoryQuantity
+  inventoryItem { tracked unitCost { amount currencyCode } }
+  product { id title status featuredMedia { preview { image { url altText } } } }`;
 export const CATALOG_QUERY = `query InventoryCatalog($after: String) {
   shop { currencyCode }
   productVariants(first: 100, after: $after, sortKey: ID) {
     pageInfo { hasNextPage endCursor }
     nodes {
-      id title sku price inventoryQuantity
-      inventoryItem { tracked unitCost { amount currencyCode } }
-      product { id title status featuredMedia { preview { image { url altText } } } }
+      ${CATALOG_FIELDS}
     }
   }
 }`;
@@ -52,7 +53,8 @@ export function inventoryTotals(rows) {
 // never look like a deleted product or clear a previously successful import.
 export function createCatalogSync({gql, Catalog, Setting}) {
   const running = new Map();
-  return function syncCatalog(shop) {
+  return function syncCatalog(shop, {fresh = false} = {}) {
+    if (fresh && running.has(shop)) return running.get(shop).catch(() => {}).then(() => syncCatalog(shop, {fresh:true}));
     if (running.has(shop)) return running.get(shop);
     const task = (async () => {
       const key = `catalog:${shop}`;

@@ -1,11 +1,34 @@
 import 'dotenv/config';import express from 'express';import mongoose from 'mongoose';import helmet from 'helmet';import compression from 'compression';import crypto from 'crypto';import path from 'path';import {fileURLToPath} from 'url';import {Order,Cost,Expense,Purchase,Session,Catalog,Setting} from './models.js';import {normalizeShop,verifyHmac,syncOrders,verifyWebhook,persistOrder,gql,ORDER_FIELDS} from './shopify.js';
 import {createCatalogSync,inventoryRow,inventoryTotals,CATALOG_INTERVAL_MS} from './catalog.js';
+import {createInventoryEditor,editError} from './inventory-edit.js';
+import {WRITE_SCOPES,safeEqual,cookieValue,ownerToken,editingAccess} from './owner-auth.js';
 const syncCatalog=createCatalogSync({gql,Catalog,Setting});
+const inventoryEditor=createInventoryEditor({gql,Catalog,syncCatalog});
+const cookieOptions={httpOnly:true,secure:process.env.NODE_ENV==='production',sameSite:'lax',path:'/'};
 const app=express(),port=process.env.PORT||3000;app.use(helmet({contentSecurityPolicy:false,crossOriginEmbedderPolicy:false}));app.use(compression());
 const asyncRoute=fn=>(req,res,next)=>Promise.resolve(fn(req,res,next)).catch(next);const shop=()=>normalizeShop(process.env.SHOPIFY_SHOP);
 app.get('/health',(req,res)=>res.json({ok:true,time:new Date()}));
-app.get('/auth',asyncRoute(async(req,res)=>{const s=normalizeShop(req.query.shop)||shop();if(!s)return res.status(400).send('Invalid shop');const state=crypto.randomBytes(20).toString('hex');res.cookie?.('oauth_state',state);const scopes=process.env.SHOPIFY_SCOPES;const redirect=`${process.env.SHOPIFY_APP_URL}/auth/callback`;res.redirect(`https://${s}/admin/oauth/authorize?client_id=${process.env.SHOPIFY_CLIENT_ID}&scope=${encodeURIComponent(scopes)}&redirect_uri=${encodeURIComponent(redirect)}&state=${state}`);}));
-app.get('/auth/callback',asyncRoute(async(req,res)=>{if(!verifyHmac(req.query))return res.status(401).send('Invalid OAuth signature');const s=normalizeShop(req.query.shop);const r=await fetch(`https://${s}/admin/oauth/access_token`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_id:process.env.SHOPIFY_CLIENT_ID,client_secret:process.env.SHOPIFY_CLIENT_SECRET,code:req.query.code})});const t=await r.json();if(!r.ok||!t.access_token)throw new Error('Could not obtain Shopify token');await Session.findOneAndUpdate({shop:s},{$set:{accessToken:t.access_token,scope:t.scope,installedAt:new Date()}},{upsert:true});syncCatalog(s).catch(error=>console.error('Catalog sync:',error.message));res.redirect('/inventory?connected=1');}));
+app.get('/auth',asyncRoute(async(req,res)=>{
+  const s=normalizeShop(req.query.shop)||shop();
+  if(!s||s!==shop())return res.status(400).send('Invalid shop');
+  const state=crypto.randomBytes(32).toString('hex');
+  res.cookie('oauth_state',state,{...cookieOptions,maxAge:10*60*1000});
+  const scopes=new Set((process.env.SHOPIFY_SCOPES||'read_orders,read_products,read_inventory,read_locations').split(',').filter(Boolean));
+  if(req.query.edit==='1')WRITE_SCOPES.forEach(scope=>scopes.add(scope));
+  const redirect=`${process.env.SHOPIFY_APP_URL}/auth/callback`;
+  res.redirect(`https://${s}/admin/oauth/authorize?client_id=${process.env.SHOPIFY_CLIENT_ID}&scope=${encodeURIComponent([...scopes].join(','))}&redirect_uri=${encodeURIComponent(redirect)}&state=${state}`);
+}));
+app.get('/auth/callback',asyncRoute(async(req,res)=>{
+  const s=normalizeShop(req.query.shop);
+  if(s!==shop()||!safeEqual(cookieValue(req,'oauth_state'),req.query.state)||!verifyHmac(req.query))return res.status(401).send('Invalid OAuth state or signature. Please start the connection again.');
+  res.clearCookie('oauth_state',cookieOptions);
+  const r=await fetch(`https://${s}/admin/oauth/access_token`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_id:process.env.SHOPIFY_CLIENT_ID,client_secret:process.env.SHOPIFY_CLIENT_SECRET,code:req.query.code}),signal:AbortSignal.timeout(30000)});
+  const t=await r.json();if(!r.ok||!t.access_token)throw new Error('Could not obtain Shopify token');
+  await Session.findOneAndUpdate({shop:s},{$set:{accessToken:t.access_token,scope:t.scope,installedAt:new Date()}},{upsert:true});
+  res.cookie('pnl_owner',ownerToken(s,process.env.SHOPIFY_CLIENT_SECRET),{...cookieOptions,maxAge:12*60*60*1000});
+  syncCatalog(s).catch(error=>console.error('Catalog sync:',error.message));
+  res.redirect('/inventory?connected=1');
+}));
 app.post('/webhooks/orders',express.raw({type:'application/json'}),asyncRoute(async(req,res)=>{if(!verifyWebhook(req.body,req.get('X-Shopify-Hmac-Sha256')))return res.sendStatus(401);res.sendStatus(200);const id=JSON.parse(req.body.toString()).admin_graphql_api_id;const s=normalizeShop(req.get('X-Shopify-Shop-Domain'));const d=await gql(s,`query($id:ID!){order(id:$id){${ORDER_FIELDS}}}`,{id});if(d.order)await persistOrder(d.order);}));
 app.use(express.json({limit:'2mb'}));
 app.get('/api/status',asyncRoute(async(req,res)=>{const session=await Session.findOne({shop:shop()}).lean();res.json({connected:!!session,shop:shop(),scope:session?.scope||'',orders:await Order.countDocuments()});}));
@@ -18,7 +41,30 @@ app.get('/api/inventory',asyncRoute(async(req,res)=>{
   const filtered=rows.filter(r=>(!q||[r.title,r.variantTitle,r.sku].some(v=>v?.toLowerCase().includes(q)))&&(!req.query.inStock||r.quantity>0));
   const limit=50,page=Math.min(Math.max(1,Math.floor(Number(req.query.page)||1)),Math.max(1,Math.ceil(filtered.length/limit)));
   const sync=await Setting.findOne({key:`catalog:${s}`}).lean();
-  res.json({items:filtered.slice((page-1)*limit,page*limit),total:filtered.length,page,limit,totals,sync:sync?.value||null,refreshMinutes:CATALOG_INTERVAL_MS/60000});
+  const session=await Session.findOne({shop:s}).select('scope').lean();
+  const editing=editingAccess(req,s,session?.scope,process.env.SHOPIFY_CLIENT_SECRET);
+  res.json({items:filtered.slice((page-1)*limit,page*limit),total:filtered.length,page,limit,totals,editing,sync:sync?.value||null,refreshMinutes:CATALOG_INTERVAL_MS/60000});
+}));
+const requireInventoryEditor=asyncRoute(async(req,res,next)=>{
+  const session=await Session.findOne({shop:shop()}).select('scope').lean();
+  const access=editingAccess(req,shop(),session?.scope,process.env.SHOPIFY_CLIENT_SECRET);
+  if(!access.allowed)return res.status(access.authenticated?403:401).json({error:access.missingScopes.length?'Approve Shopify editing access to update price, cost and inventory.':'Sign in through Shopify to edit products.',editing:access});
+  if(req.method==='PATCH'){
+    const expectedOrigin=new URL(process.env.SHOPIFY_APP_URL).origin;
+    if(req.get('origin')!==expectedOrigin||!req.is('application/json'))return res.status(403).json({error:'Save products from this workspace only.'});
+  }
+  next();
+});
+app.get('/api/inventory/:id/edit',requireInventoryEditor,asyncRoute(async(req,res)=>{
+  const record=await Catalog.findOne({_id:req.params.id,shop:shop()}).lean();
+  if(!record)throw editError('Product not found.',404);
+  res.set('Cache-Control','no-store');
+  res.json(await inventoryEditor.read(shop(),record));
+}));
+app.patch('/api/inventory/:id',requireInventoryEditor,asyncRoute(async(req,res)=>{
+  const record=await Catalog.findOne({_id:req.params.id,shop:shop()}).lean();
+  if(!record)throw editError('Product not found.',404);
+  res.json(await inventoryEditor.save(shop(),record,req.body));
 }));
 const STORE_TZ=process.env.STORE_TIMEZONE||'America/Toronto';
 const dateParts=(d,timeZone)=>Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(d).filter(p=>p.type!=='literal').map(p=>[p.type,p.value]));
@@ -34,7 +80,7 @@ app.get('/api/expenses',asyncRoute(async(req,res)=>res.json(await Expense.find()
 app.get('/api/costs',asyncRoute(async(req,res)=>res.json(await Cost.find().sort({effectiveFrom:-1}).lean())));app.post('/api/costs',asyncRoute(async(req,res)=>res.json(await Cost.create(req.body))));app.delete('/api/costs/:id',asyncRoute(async(req,res)=>{await Cost.findByIdAndDelete(req.params.id);res.sendStatus(204);}));
 app.get('/api/purchases',asyncRoute(async(req,res)=>res.json(await Purchase.find().sort({date:-1}).lean())));app.post('/api/purchases',asyncRoute(async(req,res)=>res.json(await Purchase.create(req.body))));app.delete('/api/purchases/:id',asyncRoute(async(req,res)=>{await Purchase.findByIdAndDelete(req.params.id);res.sendStatus(204);}));
 app.get('/api/pnl',asyncRoute(async(req,res)=>{const r=range(req.query),orders=await Order.find({createdAtShopify:{$gte:r.shopStart,$lte:r.shopEnd}}).lean(),expenses=await Expense.find({date:{$gte:r.ledgerStart,$lte:r.ledgerEnd}}).lean(),purchases=await Purchase.find({date:{$gte:r.ledgerStart,$lte:r.ledgerEnd}}).lean();const s=k=>orders.reduce((a,o)=>a+(o[k]||0),0),ps=k=>purchases.reduce((a,p)=>a+(p[k]||0),0);const rows=[['Gross sales',s('grossSales')],['Discounts',-s('discounts')],['Returns',-s('returns')],['Net product sales',s('netSales')],['Shipping revenue',s('shippingRevenue')],['Total revenue',s('netSales')+s('shippingRevenue')],['Cost of goods sold',-s('cogs')],['Gross profit',s('netSales')+s('shippingRevenue')-s('cogs')],['Shipping expense',-s('shippingCost')],['Payment processing',-s('paymentFees')],['Packing materials',-s('materialCost')],['Other variable costs',-s('otherVariableCost')]];const cats={};expenses.forEach(e=>cats[e.category||'Other']=(cats[e.category||'Other']||0)+e.amount);Object.entries(cats).forEach(([k,v])=>rows.push([k,-v]));const net=s('netSales')+s('shippingRevenue')-s('cogs')-s('shippingCost')-s('paymentFees')-s('materialCost')-s('otherVariableCost')-expenses.reduce((a,e)=>a+e.amount,0);rows.push(['Net profit',net]);const purchaseRows=[['PO / inventory purchases',ps('total')],['Inbound purchase shipping',ps('shipping')],['Duties & import costs',ps('duties')],['Purchase taxes',ps('tax')],['Tracked purchase outlay',ps('total')+ps('shipping')+ps('duties')+ps('tax')]];res.json({start:r.startText,end:r.endText,rows,net,purchaseRows,purchaseCount:purchases.length});}));
-const __dirname=path.dirname(fileURLToPath(import.meta.url)),dist=path.join(__dirname,'../dist');if(process.env.NODE_ENV==='production'){app.use(express.static(dist));app.use((req,res,next)=>{if(req.method!=='GET'||req.path.startsWith('/api/')||req.path.startsWith('/auth')||req.path.startsWith('/webhooks/')||req.path==='/health')return next();res.sendFile(path.join(dist,'index.html'));});}app.use((err,req,res,next)=>{console.error(err);res.status(500).json({error:err.message||'Server error'});});
+const __dirname=path.dirname(fileURLToPath(import.meta.url)),dist=path.join(__dirname,'../dist');if(process.env.NODE_ENV==='production'){app.use(express.static(dist));app.use((req,res,next)=>{if(req.method!=='GET'||req.path.startsWith('/api/')||req.path.startsWith('/auth')||req.path.startsWith('/webhooks/')||req.path==='/health')return next();res.sendFile(path.join(dist,'index.html'));});}app.use((err,req,res,next)=>{console.error(err);res.status(err.status||500).json({error:err.message||'Server error'});});
 await mongoose.connect(process.env.MONGODB_URI);
 const refreshCatalog=async()=>{const s=shop();if(s&&await Session.exists({shop:s}))await syncCatalog(s)};
 refreshCatalog().catch(error=>console.error('Catalog sync:',error.message));
