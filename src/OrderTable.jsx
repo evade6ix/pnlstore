@@ -1,0 +1,5 @@
+import React from 'react';
+import {useNavigate} from 'react-router-dom';
+import {ChevronRight} from 'lucide-react';
+import {money,dateFmt} from './api.js';
+export default function OrderTable({items=[]}){const nav=useNavigate();return <div className="tablewrap"><table><thead><tr><th>Order</th><th>Date</th><th>Source</th><th className="num">Revenue</th><th className="num">COGS</th><th className="num">Profit</th><th></th></tr></thead><tbody>{items.map(o=>{const rev=(o.netSales||0)+(o.shippingRevenue||0),profit=rev-(o.cogs||0)-(o.shippingCost||0)-(o.paymentFees||0)-(o.materialCost||0)-(o.otherVariableCost||0);return <tr key={o._id} onClick={()=>nav(`/orders/${o._id}`)}><td><strong>{o.name||o.orderNumber}</strong></td><td>{dateFmt(o.createdAtShopify)}</td><td><span className={`badge ${o.source}`}>{o.source}</span></td><td className="num">{money(rev)}</td><td className="num muted">{money(o.cogs)}</td><td className={`num strong ${profit<0?'negative':'positive'}`}>{money(profit)}</td><td><ChevronRight size={16}/></td></tr>})}{!items.length&&<tr><td colSpan="7" className="empty">No orders found.</td></tr>}</tbody></table></div>}

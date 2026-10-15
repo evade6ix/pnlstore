@@ -72,3 +72,15 @@ The receiver checks the raw-body HMAC and configured shop, validates resource ID
 Product events refresh every variant of the affected product using fresh Shopify state; stock and cost events resolve the inventory item to its product. This avoids relying on event ordering or truncated payloads. Unknown new inventory items trigger a full recovery scan. Full scans and targeted refreshes share a per-shop queue to avoid stale scans overwriting newer data. Deleted products/variants disappear from the catalog without removing historical orders.
 
 The five-minute full polling loop is replaced by an hourly full backup, while manual sync and direct editing remain available. The Inventory page continues to refresh saved data every 30 seconds and shows webhook registration, errors, queued work, and last processed event. Webhook subscriptions and worker failures are visible through the `webhooks` / `pendingWebhooks` fields of `/api/inventory`.
+
+## Editing financial records
+
+Expenses, purchases/POs, and effective-dated product cost overrides have searchable tables with prefilled Edit forms. Expense edits include date, vendor, category, amount, tax, reference, description, recurring label and notes. Purchase edits include supplier, date, PO number, status, goods amount, freight, duties, tax and notes, with a total-outlay preview. Tax on operating expenses remains separate from the P&L expense amount.
+
+Manual sales support multiple items, quantities, SKU/variant labels, line sales totals, discounts, unit costs, shipping charged, taxes, fulfilment/payment costs and notes. Existing manual sales retain their identity and order number when edited. Sales and COGS totals are calculated on the server; subsequent dashboard and P&L requests use the saved records. Orders have editable per-line unit costs and fulfilment costs. Shopify-origin products, discounts and sale status are edited through the order’s Open in Shopify link.
+
+Financial mutations require the signed Shopify owner session, the configured application origin and JSON. Updates and deletions include the version loaded by the editor (`expectedUpdatedAt`); a stale version returns HTTP 409 instead of overwriting another save. The API validates and allowlists fields, and rejects invalid dates, quantities and costs. Deleting a financial record requires confirmation in the UI.
+
+Shopify reimports preserve each existing order line’s saved historical unit cost, including zero costs and order-specific corrections. Import updates also guard the order version and retry if an edit races a sync. Editing a cost override affects future imported order lines; correct existing sales directly through their order costs. Catalog costs and inventory quantities continue to be edited separately through Shopify.
+
+Run `npm test` for ledger validation, derived financial totals, authenticated HTTP updates, stale-write protection, historical snapshots, and existing inventory/webhook checks.
