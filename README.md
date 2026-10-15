@@ -50,3 +50,11 @@ A complete paginated catalog sync runs on server startup, after OAuth, and every
 Inventory value = selling price × max(available quantity, 0). Inventory cost = Shopify unit cost × max(available quantity, 0). Gross margin = (price − unit cost) ÷ price × 100. Total potential gross profit = (price − unit cost) × max(available quantity, 0), before fees, shipping, discounts and tax.
 
 Run `npm test` for inventory valuation, missing-cost handling, cursor pagination, concurrent sync deduplication, safe retry, and deletion reconciliation tests.
+
+## Editing Shopify products
+
+The Inventory table has an **Edit** action for each variant. The editor loads fresh Shopify values, supports price and unit cost, and shows available stock separately for each existing inventory location. **Save to Shopify** writes only changed fields using one `productVariantsBulkUpdate` mutation, then reads the saved Shopify values and refreshes the local catalog and totals. Quantity adjustments use `changeFromQuantity` so a concurrent order cannot be silently overwritten. Shopify errors leave the editor open; network-uncertain writes are never automatically retried.
+
+Use **Enable Shopify editing** once in the browser to authorize the configured store and request `write_products` and `write_inventory` in addition to the configured read scopes. These write scopes must also be allowed for the app in Shopify’s Dev Dashboard. The OAuth callback sets an HttpOnly, Secure (production), signed owner cookie valid for 12 hours. Editor API routes require that cookie and the granted write scopes; PATCH requests additionally require the configured application origin and JSON content type. OAuth state is checked against a short-lived cookie and callbacks are restricted to `SHOPIFY_SHOP`. Opening the public inventory URL does not grant editing rights.
+
+Existing order cost snapshots and manual COGS overrides are not modified by catalog edits. Inventory must already be tracked and stocked at a Shopify location to change its quantity.
