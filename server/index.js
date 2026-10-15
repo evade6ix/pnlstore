@@ -1,7 +1,7 @@
 import 'dotenv/config';import express from 'express';import mongoose from 'mongoose';import helmet from 'helmet';import compression from 'compression';import crypto from 'crypto';import path from 'path';import {fileURLToPath} from 'url';import {Order,Cost,Expense,Purchase,Session,Catalog,Setting} from './models.js';import {normalizeShop,verifyHmac,syncOrders,verifyWebhook,persistOrder,gql,ORDER_FIELDS} from './shopify.js';
 import {createCatalogSync,inventoryRow,inventoryTotals,CATALOG_INTERVAL_MS} from './catalog.js';
 import {createInventoryEditor,editError} from './inventory-edit.js';
-import {WRITE_SCOPES,safeEqual,cookieValue,ownerToken,editingAccess} from './owner-auth.js';
+import {WRITE_SCOPES,safeEqual,cookieValue,ownerToken,editingAccess,refreshGrantedScopes,editingReturnUrl} from './owner-auth.js';
 const syncCatalog=createCatalogSync({gql,Catalog,Setting});
 const inventoryEditor=createInventoryEditor({gql,Catalog,syncCatalog});
 const cookieOptions={httpOnly:true,secure:process.env.NODE_ENV==='production',sameSite:'lax',path:'/'};
@@ -13,6 +13,7 @@ app.get('/auth',asyncRoute(async(req,res)=>{
   if(!s||s!==shop())return res.status(400).send('Invalid shop');
   const state=crypto.randomBytes(32).toString('hex');
   res.cookie('oauth_state',state,{...cookieOptions,maxAge:10*60*1000});
+  res.cookie('oauth_edit',req.query.edit==='1'?'1':'0',{...cookieOptions,maxAge:10*60*1000});
   const scopes=new Set((process.env.SHOPIFY_SCOPES||'read_orders,read_products,read_inventory,read_locations').split(',').filter(Boolean));
   if(req.query.edit==='1')WRITE_SCOPES.forEach(scope=>scopes.add(scope));
   const redirect=`${process.env.SHOPIFY_APP_URL}/auth/callback`;
@@ -21,13 +22,16 @@ app.get('/auth',asyncRoute(async(req,res)=>{
 app.get('/auth/callback',asyncRoute(async(req,res)=>{
   const s=normalizeShop(req.query.shop);
   if(s!==shop()||!safeEqual(cookieValue(req,'oauth_state'),req.query.state)||!verifyHmac(req.query))return res.status(401).send('Invalid OAuth state or signature. Please start the connection again.');
-  res.clearCookie('oauth_state',cookieOptions);
+  const editingRequested=cookieValue(req,'oauth_edit')==='1';
+  res.clearCookie('oauth_state',cookieOptions);res.clearCookie('oauth_edit',cookieOptions);
   const r=await fetch(`https://${s}/admin/oauth/access_token`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client_id:process.env.SHOPIFY_CLIENT_ID,client_secret:process.env.SHOPIFY_CLIENT_SECRET,code:req.query.code}),signal:AbortSignal.timeout(30000)});
   const t=await r.json();if(!r.ok||!t.access_token)throw new Error('Could not obtain Shopify token');
   await Session.findOneAndUpdate({shop:s},{$set:{accessToken:t.access_token,scope:t.scope,installedAt:new Date()}},{upsert:true});
   res.cookie('pnl_owner',ownerToken(s,process.env.SHOPIFY_CLIENT_SECRET),{...cookieOptions,maxAge:12*60*60*1000});
   syncCatalog(s).catch(error=>console.error('Catalog sync:',error.message));
-  res.redirect('/inventory?connected=1');
+  let grantedScope=t.scope;
+  try{grantedScope=await refreshGrantedScopes(s,{gql,Session});}catch(error){console.error('Permission check:',error.message);}
+  res.redirect(editingRequested?editingReturnUrl(grantedScope):'/inventory?connected=1');
 }));
 app.post('/webhooks/orders',express.raw({type:'application/json'}),asyncRoute(async(req,res)=>{if(!verifyWebhook(req.body,req.get('X-Shopify-Hmac-Sha256')))return res.sendStatus(401);res.sendStatus(200);const id=JSON.parse(req.body.toString()).admin_graphql_api_id;const s=normalizeShop(req.get('X-Shopify-Shop-Domain'));const d=await gql(s,`query($id:ID!){order(id:$id){${ORDER_FIELDS}}}`,{id});if(d.order)await persistOrder(d.order);}));
 app.use(express.json({limit:'2mb'}));
@@ -55,6 +59,15 @@ const requireInventoryEditor=asyncRoute(async(req,res,next)=>{
   }
   next();
 });
+app.post('/api/inventory/access',asyncRoute(async(req,res)=>{
+  const session=await Session.findOne({shop:shop()}).select('scope').lean();
+  const access=editingAccess(req,shop(),session?.scope,process.env.SHOPIFY_CLIENT_SECRET);
+  if(!access.authenticated)return res.status(401).json({error:'Sign in through Shopify before checking editing access.'});
+  if(req.get('origin')!==new URL(process.env.SHOPIFY_APP_URL).origin||!req.is('application/json'))return res.status(403).json({error:'Check permissions from this workspace only.'});
+  const scope=await refreshGrantedScopes(shop(),{gql,Session});
+  res.set('Cache-Control','no-store');
+  res.json(editingAccess(req,shop(),scope,process.env.SHOPIFY_CLIENT_SECRET));
+}));
 app.get('/api/inventory/:id/edit',requireInventoryEditor,asyncRoute(async(req,res)=>{
   const record=await Catalog.findOne({_id:req.params.id,shop:shop()}).lean();
   if(!record)throw editError('Product not found.',404);

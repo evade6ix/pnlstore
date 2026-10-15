@@ -1,6 +1,19 @@
 import crypto from 'node:crypto';
 
 export const WRITE_SCOPES = ['write_products', 'write_inventory'];
+export const GRANTED_SCOPES_QUERY = `query PnlstoreGrantedScopes { currentAppInstallation { accessScopes { handle } } }`;
+export async function refreshGrantedScopes(shop, {gql, Session}) {
+  const result = await gql(shop, GRANTED_SCOPES_QUERY);
+  const scopes = result.currentAppInstallation?.accessScopes;
+  if (!Array.isArray(scopes) || scopes.some(scope => typeof scope.handle !== 'string')) throw new Error('Shopify did not return valid app permissions.');
+  const scope = scopes.map(value => value.handle).join(',');
+  await Session.updateOne({shop}, {$set:{scope}});
+  return scope;
+}
+export function editingReturnUrl(scope) {
+  const scopes = new Set(String(scope || '').split(','));
+  return WRITE_SCOPES.every(s => scopes.has(s)) ? '/inventory?editing=enabled' : '/inventory?editing=permissions-required';
+}
 export const safeEqual = (a, b) => typeof a === 'string' && typeof b === 'string' &&
   Buffer.byteLength(a) === Buffer.byteLength(b) && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
 export function cookieValue(req, name) {

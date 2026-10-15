@@ -1,8 +1,9 @@
 import React, {useEffect, useRef, useState} from 'react';
 import {RefreshCw, X} from 'lucide-react';
 import {api} from './api.js';
+import ShopifyEditingAccess from './ShopifyEditingAccess.jsx';
 
-export default function InventoryEditor({row, access, onClose, onSaved}) {
+export default function InventoryEditor({row, access, onAccessChecked, onClose, onSaved}) {
   const dialog = useRef(null);
   const [initial, setInitial] = useState(null), [price, setPrice] = useState(''), [cost, setCost] = useState('');
   const [quantities, setQuantities] = useState({}), [loading, setLoading] = useState(false);
@@ -16,7 +17,8 @@ export default function InventoryEditor({row, access, onClose, onSaved}) {
     } catch (error) {setError(error.message);}
     finally {setLoading(false);}
   };
-  useEffect(() => {dialog.current.showModal(); if (access.allowed) load();}, []);
+  useEffect(() => {dialog.current.showModal();}, []);
+  useEffect(() => {if (access.allowed) load();}, [access.allowed]);
   const changes = () => {
     if (!initial) return {};
     const body = {expected:{price:initial.price, unitCost:initial.unitCost}};
@@ -41,7 +43,7 @@ export default function InventoryEditor({row, access, onClose, onSaved}) {
     <form onSubmit={save}>
       <div className="modal-head"><h2>Edit product</h2><button type="button" className="icon" aria-label="Close editor" disabled={saving} onClick={onClose}><X size={18}/></button></div>
       <div className="inventory-edit-title"><strong>{row.title}</strong>{row.variantTitle !== 'Default Title' && <span>{row.variantTitle}</span>}</div>
-      {!access.allowed ? <div className="inventory-enable"><p>Sign in through Shopify and approve editing access to update your store’s prices, costs and inventory.</p><a className="button" href={access.authUrl}>Enable Shopify editing</a></div> : <>
+      {!access.allowed ? <ShopifyEditingAccess access={access} onChecked={onAccessChecked}/> : <>
         <p className="inventory-editor-copy">Changes save directly to Shopify. Amounts are in {initial?.currency || row.currency}; stock is available quantity at each location.</p>
         {error && <div className="notice" role="alert"><div><strong>Could not complete this request</strong><span>{error}</span></div><button type="button" className="secondary" disabled={saving || loading} onClick={load}>Reload values</button></div>}
         {loading ? <div className="loading">Loading current Shopify values…</div> : initial && <fieldset disabled={saving} className="inventory-edit-fields">

@@ -2,6 +2,7 @@ import React, {useEffect, useState} from 'react';
 import {RefreshCw, Search, PackageSearch, AlertCircle, Pencil} from 'lucide-react';
 import {api, pct} from './api.js';
 import InventoryEditor from './InventoryEditor.jsx';
+import ShopifyEditingAccess from './ShopifyEditingAccess.jsx';
 
 export default function Inventory() {
   const [data, setData] = useState(null), [query, setQuery] = useState('');
@@ -42,7 +43,7 @@ export default function Inventory() {
       <span>{currency} · All product statuses</span>
     </div>
     {saved && <div className="inventory-note inventory-saved" role="status">{saved}</div>}
-    {data?.editing && !data.editing.allowed && <div className="notice"><div><strong>Edit your Shopify products here</strong><span>Enable editing once to save price, cost and stock changes directly to Shopify.</span></div><a className="button" href={data.editing.authUrl}>Enable Shopify editing</a></div>}
+    {data?.editing && !data.editing.allowed && <ShopifyEditingAccess access={data.editing} onChecked={editing => setData(previous => ({...previous,editing}))}/>}
     {(error || state?.error) && <div className="notice" role="alert"><AlertCircle size={18}/><div><strong>Sync needs attention</strong><span>{error || state.error}</span></div><button className="secondary" disabled={busy} onClick={sync}>Retry sync</button></div>}
     <section className="kpi-grid">
       <Stat label="Total inventory value" value={money(totals?.inventoryValue)} sub="Selling price × available quantity"/>
@@ -75,7 +76,7 @@ export default function Inventory() {
     <div className="inventory-pagination"><span>Page {actualPage} of {pages}</span><div><button className="secondary" disabled={actualPage <= 1} onClick={() => setPage(actualPage - 1)}>Previous</button><button className="secondary" disabled={actualPage >= pages} onClick={() => setPage(actualPage + 1)}>Next</button></div></div>
     </section>
     <p className="inventory-footnote">Totals cover the full catalog, regardless of search or page. Quantity is Shopify’s available stock across locations; negative quantities count as zero for valuation. Gross margin = (price − cost) ÷ price. Total gross profit = (price − cost) × available quantity, before fees, shipping and tax.</p>
-    {editing && <InventoryEditor row={editing} access={data.editing} onClose={() => setEditing(null)} onSaved={onSaved}/>}
+    {editing && <InventoryEditor row={editing} access={data.editing} onAccessChecked={access => setData(previous => ({...previous,editing:access}))} onClose={() => setEditing(null)} onSaved={onSaved}/>}
   </>;
 }
 function Stat({label, value, sub, tone = ''}) {
