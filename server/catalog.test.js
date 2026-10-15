@@ -80,3 +80,30 @@ test('empty catalog clears deleted products only after a successful Shopify fetc
   assert.equal(h.writes.length, 0);
   assert.equal(h.deletes.length, 1);
 });
+
+test('a webhook product refresh limits reads and deletion cleanup to that product',async()=>{
+  const productId='product-1',realId='gid://shopify/Product/123';
+  let variables;
+  const h=harness(async(shop,query,v)=>{variables=v;return page([node('1',{product:{id:realId,title:'Product',status:'ACTIVE',featuredMedia:null}})]);});
+  await h.sync.refreshProduct('test.myshopify.com',realId);
+  assert.equal(variables.filter,'product_id:123');
+  assert.equal(h.deletes[0].productId,realId);
+  assert.equal(h.settings.length,0);
+});
+
+test('a failed product page cannot delete existing product records',async()=>{
+  const h=harness(async()=>{throw new Error('Access denied');});
+  await assert.rejects(h.sync.refreshProduct('test.myshopify.com','gid://shopify/Product/123'),/Access denied/);
+  assert.equal(h.deletes.length,0);
+});
+
+test('targeted refreshes wait for a running full scan',async()=>{
+  let release;
+  const block=new Promise(resolve=>{release=resolve;});
+  const filters=[];
+  const h=harness(async(shop,query,{filter})=>{filters.push(filter);if(!filter)await block;return page([]);});
+  const full=h.sync('test.myshopify.com');
+  const product=h.sync.refreshProduct('test.myshopify.com','gid://shopify/Product/123');
+  assert.deepEqual(filters,[null]);release();await Promise.all([full,product]);
+  assert.deepEqual(filters,[null,'product_id:123']);
+});

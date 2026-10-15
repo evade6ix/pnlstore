@@ -1,9 +1,11 @@
-import 'dotenv/config';import express from 'express';import mongoose from 'mongoose';import helmet from 'helmet';import compression from 'compression';import crypto from 'crypto';import path from 'path';import {fileURLToPath} from 'url';import {Order,Cost,Expense,Purchase,Session,Catalog,Setting} from './models.js';import {normalizeShop,verifyHmac,syncOrders,verifyWebhook,persistOrder,gql,ORDER_FIELDS} from './shopify.js';
+import 'dotenv/config';import express from 'express';import mongoose from 'mongoose';import helmet from 'helmet';import compression from 'compression';import crypto from 'crypto';import path from 'path';import {fileURLToPath} from 'url';import {Order,Cost,Expense,Purchase,Session,Catalog,Setting,WebhookJob} from './models.js';import {normalizeShop,verifyHmac,syncOrders,verifyWebhook,persistOrder,gql,ORDER_FIELDS} from './shopify.js';
 import {createCatalogSync,inventoryRow,inventoryTotals,CATALOG_INTERVAL_MS} from './catalog.js';
 import {createInventoryEditor,editError} from './inventory-edit.js';
 import {WRITE_SCOPES,safeEqual,cookieValue,ownerToken,editingAccess,refreshGrantedScopes,editingReturnUrl} from './owner-auth.js';
+import {createCatalogWebhooks,validWebhook} from './catalog-webhooks.js';
 const syncCatalog=createCatalogSync({gql,Catalog,Setting});
 const inventoryEditor=createInventoryEditor({gql,Catalog,syncCatalog});
+const catalogWebhooks=createCatalogWebhooks({gql,Catalog,Setting,WebhookJob,syncCatalog,appUrl:process.env.SHOPIFY_APP_URL});
 const cookieOptions={httpOnly:true,secure:process.env.NODE_ENV==='production',sameSite:'lax',path:'/'};
 const app=express(),port=process.env.PORT||3000;app.use(helmet({contentSecurityPolicy:false,crossOriginEmbedderPolicy:false}));app.use(compression());
 const asyncRoute=fn=>(req,res,next)=>Promise.resolve(fn(req,res,next)).catch(next);const shop=()=>normalizeShop(process.env.SHOPIFY_SHOP);
@@ -29,9 +31,18 @@ app.get('/auth/callback',asyncRoute(async(req,res)=>{
   await Session.findOneAndUpdate({shop:s},{$set:{accessToken:t.access_token,scope:t.scope,installedAt:new Date()}},{upsert:true});
   res.cookie('pnl_owner',ownerToken(s,process.env.SHOPIFY_CLIENT_SECRET),{...cookieOptions,maxAge:12*60*60*1000});
   syncCatalog(s).catch(error=>console.error('Catalog sync:',error.message));
+  catalogWebhooks.ensure(s).catch(error=>console.error('Catalog webhooks:',error.message));
   let grantedScope=t.scope;
   try{grantedScope=await refreshGrantedScopes(s,{gql,Session});}catch(error){console.error('Permission check:',error.message);}
   res.redirect(editingRequested?editingReturnUrl(grantedScope):'/inventory?connected=1');
+}));
+app.post('/webhooks/catalog',express.raw({type:'application/json',limit:'5mb'}),asyncRoute(async(req,res)=>{
+  if(!validWebhook(req.body,req.get('X-Shopify-Hmac-Sha256'),process.env.SHOPIFY_CLIENT_SECRET))return res.sendStatus(401);
+  const s=normalizeShop(req.get('X-Shopify-Shop-Domain'));
+  if(!s||s!==shop())return res.sendStatus(403);
+  let payload;try{payload=JSON.parse(req.body.toString());}catch{return res.status(400).json({error:'Invalid webhook JSON'});}
+  await catalogWebhooks.receive(s,req.get('X-Shopify-Topic'),req.get('X-Shopify-Webhook-Id'),payload);
+  res.sendStatus(200);
 }));
 app.post('/webhooks/orders',express.raw({type:'application/json'}),asyncRoute(async(req,res)=>{if(!verifyWebhook(req.body,req.get('X-Shopify-Hmac-Sha256')))return res.sendStatus(401);res.sendStatus(200);const id=JSON.parse(req.body.toString()).admin_graphql_api_id;const s=normalizeShop(req.get('X-Shopify-Shop-Domain'));const d=await gql(s,`query($id:ID!){order(id:$id){${ORDER_FIELDS}}}`,{id});if(d.order)await persistOrder(d.order);}));
 app.use(express.json({limit:'2mb'}));
@@ -47,7 +58,9 @@ app.get('/api/inventory',asyncRoute(async(req,res)=>{
   const sync=await Setting.findOne({key:`catalog:${s}`}).lean();
   const session=await Session.findOne({shop:s}).select('scope').lean();
   const editing=editingAccess(req,s,session?.scope,process.env.SHOPIFY_CLIENT_SECRET);
-  res.json({items:filtered.slice((page-1)*limit,page*limit),total:filtered.length,page,limit,totals,editing,sync:sync?.value||null,refreshMinutes:CATALOG_INTERVAL_MS/60000});
+  const hookState=await Setting.findOne({key:`catalogWebhooks:${s}`}).lean();
+  const pendingWebhooks=await WebhookJob.countDocuments({shop:s,status:{$ne:'done'}});
+  res.json({items:filtered.slice((page-1)*limit,page*limit),total:filtered.length,page,limit,totals,editing,webhooks:hookState?.value||null,pendingWebhooks,sync:sync?.value||null,refreshMinutes:CATALOG_INTERVAL_MS/60000});
 }));
 const requireInventoryEditor=asyncRoute(async(req,res,next)=>{
   const session=await Session.findOne({shop:shop()}).select('scope').lean();
@@ -95,7 +108,12 @@ app.get('/api/purchases',asyncRoute(async(req,res)=>res.json(await Purchase.find
 app.get('/api/pnl',asyncRoute(async(req,res)=>{const r=range(req.query),orders=await Order.find({createdAtShopify:{$gte:r.shopStart,$lte:r.shopEnd}}).lean(),expenses=await Expense.find({date:{$gte:r.ledgerStart,$lte:r.ledgerEnd}}).lean(),purchases=await Purchase.find({date:{$gte:r.ledgerStart,$lte:r.ledgerEnd}}).lean();const s=k=>orders.reduce((a,o)=>a+(o[k]||0),0),ps=k=>purchases.reduce((a,p)=>a+(p[k]||0),0);const rows=[['Gross sales',s('grossSales')],['Discounts',-s('discounts')],['Returns',-s('returns')],['Net product sales',s('netSales')],['Shipping revenue',s('shippingRevenue')],['Total revenue',s('netSales')+s('shippingRevenue')],['Cost of goods sold',-s('cogs')],['Gross profit',s('netSales')+s('shippingRevenue')-s('cogs')],['Shipping expense',-s('shippingCost')],['Payment processing',-s('paymentFees')],['Packing materials',-s('materialCost')],['Other variable costs',-s('otherVariableCost')]];const cats={};expenses.forEach(e=>cats[e.category||'Other']=(cats[e.category||'Other']||0)+e.amount);Object.entries(cats).forEach(([k,v])=>rows.push([k,-v]));const net=s('netSales')+s('shippingRevenue')-s('cogs')-s('shippingCost')-s('paymentFees')-s('materialCost')-s('otherVariableCost')-expenses.reduce((a,e)=>a+e.amount,0);rows.push(['Net profit',net]);const purchaseRows=[['PO / inventory purchases',ps('total')],['Inbound purchase shipping',ps('shipping')],['Duties & import costs',ps('duties')],['Purchase taxes',ps('tax')],['Tracked purchase outlay',ps('total')+ps('shipping')+ps('duties')+ps('tax')]];res.json({start:r.startText,end:r.endText,rows,net,purchaseRows,purchaseCount:purchases.length});}));
 const __dirname=path.dirname(fileURLToPath(import.meta.url)),dist=path.join(__dirname,'../dist');if(process.env.NODE_ENV==='production'){app.use(express.static(dist));app.use((req,res,next)=>{if(req.method!=='GET'||req.path.startsWith('/api/')||req.path.startsWith('/auth')||req.path.startsWith('/webhooks/')||req.path==='/health')return next();res.sendFile(path.join(dist,'index.html'));});}app.use((err,req,res,next)=>{console.error(err);res.status(err.status||500).json({error:err.message||'Server error'});});
 await mongoose.connect(process.env.MONGODB_URI);
+await WebhookJob.init();
 const refreshCatalog=async()=>{const s=shop();if(s&&await Session.exists({shop:s}))await syncCatalog(s)};
-refreshCatalog().catch(error=>console.error('Catalog sync:',error.message));
+const maintainWebhooks=async()=>{const s=shop();if(s&&await Session.exists({shop:s}))return catalogWebhooks.ensure(s)};
+const initializeCatalog=async()=>{try{await refreshCatalog();}finally{await maintainWebhooks();}};
+initializeCatalog().catch(error=>console.error('Catalog initialization:',error.message));
 setInterval(()=>refreshCatalog().catch(error=>console.error('Catalog sync:',error.message)),CATALOG_INTERVAL_MS).unref();
+setInterval(()=>maintainWebhooks().catch(error=>console.error('Catalog webhooks:',error.message)),CATALOG_INTERVAL_MS).unref();
+setInterval(()=>{const s=shop();if(s)catalogWebhooks.pump(s).catch(error=>console.error('Catalog webhook worker:',error.message));},2000).unref();
 app.listen(port,'0.0.0.0',()=>console.log(`P&L server listening on ${port}`));

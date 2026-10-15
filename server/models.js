@@ -8,7 +8,14 @@ const ExpenseSchema=new Schema({date:{type:Date,index:true,required:true},vendor
 const PurchaseSchema=new Schema({date:{type:Date,index:true,required:true},vendor:String,poNumber:String,status:{type:String,default:'paid'},subtotal:Money,shipping:Money,duties:Money,tax:Money,total:Money,notes:String},{timestamps:true});
 const SettingSchema=new Schema({key:{type:String,unique:true},value:Schema.Types.Mixed},{timestamps:true});
 const SessionSchema=new Schema({shop:{type:String,unique:true},accessToken:String,scope:String,installedAt:Date},{timestamps:true});
-const CatalogSchema=new Schema({shop:{type:String,required:true},variantId:{type:String,required:true},productId:String,title:String,variantTitle:String,sku:String,status:String,imageUrl:String,imageAlt:String,price:Number,unitCost:{type:Number,default:null},quantity:{type:Number,default:null},tracked:Boolean,currency:String,lastSyncedAt:Date},{timestamps:true});
+const CatalogSchema=new Schema({shop:{type:String,required:true},variantId:{type:String,required:true},productId:String,inventoryItemId:String,title:String,variantTitle:String,sku:String,status:String,imageUrl:String,imageAlt:String,price:Number,unitCost:{type:Number,default:null},quantity:{type:Number,default:null},tracked:Boolean,currency:String,lastSyncedAt:Date},{timestamps:true});
 CatalogSchema.index({shop:1,variantId:1},{unique:true});
+CatalogSchema.index({shop:1,inventoryItemId:1});
 export const Catalog=mongoose.model('Catalog',CatalogSchema);
 export const Order=mongoose.model('Order',OrderSchema);export const Cost=mongoose.model('Cost',CostSchema);export const Expense=mongoose.model('Expense',ExpenseSchema);export const Purchase=mongoose.model('Purchase',PurchaseSchema);export const Setting=mongoose.model('Setting',SettingSchema);export const Session=mongoose.model('Session',SessionSchema);
+
+const WebhookJobSchema=new Schema({shop:{type:String,required:true},deliveryId:{type:String,required:true},topic:String,resourceType:String,resourceId:String,status:{type:String,default:'pending'},attempts:{type:Number,default:0},nextAttemptAt:{type:Date,default:Date.now},lockedUntil:Date,receivedAt:{type:Date,default:Date.now},processedAt:Date,error:String,expiresAt:Date},{timestamps:true});
+WebhookJobSchema.index({shop:1,deliveryId:1},{unique:true});
+WebhookJobSchema.index({status:1,nextAttemptAt:1,lockedUntil:1});
+WebhookJobSchema.index({expiresAt:1},{expireAfterSeconds:0});
+export const WebhookJob=mongoose.model('WebhookJob',WebhookJobSchema);
