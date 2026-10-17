@@ -30,7 +30,8 @@ export default function ManualSaleEditor({record,onClose,onSaved}){
   const [values,setValues]=useState(()=>({name:record?.name||'Manual sale',date:record?.createdAtShopify?.slice(0,10)||new Date().toISOString().slice(0,10),
     shippingRevenue:record?.shippingRevenue??0,shippingCost:record?.shippingCost??0,paymentFees:record?.paymentFees??0,materialCost:record?.materialCost??0,otherVariableCost:record?.otherVariableCost??0,notes:record?.notes||''}));
   const [lines,setLines]=useState(()=>record?.lines?.map(line=>({...line,unitPrice:Number(line.quantity)?Number(line.gross||0)/Number(line.quantity):0,autoPrice:false}))||[blankLine()]);
-  const [afterTaxOverride,setAfterTaxOverride]=useState(()=>record?.totalCollected!=null?String(record.totalCollected):'');
+  const [afterTaxOverride,setAfterTaxOverride]=useState('');
+  const [afterTaxTouched,setAfterTaxTouched]=useState(false);
   useEffect(()=>{api('/api/status').then(setAccess).catch(error=>setError(error.message));},[]);
   const change=(key,value)=>setValues({...values,[key]:value});
   const lineChange=(index,key,value)=>setLines(previous=>previous.map((line,i)=>{
@@ -44,7 +45,11 @@ export default function ManualSaleEditor({record,onClose,onSaved}){
   const net=useMemo(()=>lines.reduce((sum,line)=>sum+(Number(line.gross)||0)-(Number(line.discount)||0),0),[lines]);
   const taxableBase=net+(Number(values.shippingRevenue)||0);
   const defaultAfterTax=Math.round((taxableBase*1.13+Number.EPSILON)*100)/100;
-  const afterTax=afterTaxOverride===''?defaultAfterTax:Number(afterTaxOverride||0);
+  const existingAfterTax=record?.totalCollected!=null?Number(record.totalCollected):defaultAfterTax;
+  const existingBase=(Number(record?.netSales)||0)+(Number(record?.shippingRevenue)||0);
+  const existingDefault=Math.round((existingBase*1.13+Number.EPSILON)*100)/100;
+  const hadCustomTax=!!record&&Math.abs(existingAfterTax-existingDefault)>0.01;
+  const afterTax=afterTaxTouched?Number(afterTaxOverride||0):(hadCustomTax?existingAfterTax:defaultAfterTax);
   const taxes=Math.max(0,Math.round(((afterTax-taxableBase)+Number.EPSILON)*100)/100);
   const cogs=lines.reduce((sum,line)=>sum+(Number(line.unitCost)||0)*(Number(line.quantity)||0),0);
   const variable=['shippingCost','paymentFees','materialCost','otherVariableCost'].reduce((sum,key)=>sum+(Number(values[key])||0),0);
@@ -59,24 +64,25 @@ export default function ManualSaleEditor({record,onClose,onSaved}){
       const result=await api(`/api/manual-sales${record?`/${record._id}`:''}`,{method:record?'PATCH':'POST',body:JSON.stringify(body)});onSaved(result);
     }catch(error){setError(error.message);}finally{setBusy(false);}
   };
+  const afterTaxFieldValue=afterTaxTouched?afterTaxOverride:(hadCustomTax?existingAfterTax:defaultAfterTax);
   return <RecordDialog title={record?'Edit manual sale':'Add manual sale'} onClose={onClose} busy={busy} onSubmit={save} wide>
     <SignInNotice access={access}/>{error&&<div className="notice" role="alert">{error}</div>}
     <fieldset className="record-fieldset" disabled={busy||!access?.ownerAuthenticated}>
       <div className="formgrid"><InputField field={{name:'name',label:'Sale name',required:true}} value={values.name} onChange={value=>change('name',value)}/><InputField field={{name:'date',label:'Sale date',type:'date',required:true}} value={values.date} onChange={value=>change('date',value)}/></div>
       <div className="record-section-heading"><h3>Sale items</h3><button className="secondary" type="button" onClick={()=>setLines([...lines,blankLine()])}><Plus size={14}/>Add item</button></div>
       <p className="record-help">Choose the exact Shopify product variant sold. Its current Shopify cost is copied into the sale and the sold quantity is removed from Shopify inventory when you save.</p>
-      {lines.map((line,index)=><div className="sale-line-card" key={index}><div className="sale-line-heading"><strong>Item {index+1}</strong><button className="icon danger" type="button" aria-label={`Remove item ${index+1}`} disabled={lines.length===1} onClick={()=>setLines(lines.filter((_,i)=>i!==index))}><Trash2 size={15}/></button></div>
+      {lines.map((line,index)=><div className="sale-line-card" key={line.variantId||index}><div className="sale-line-heading"><strong>Item {index+1}</strong><button className="icon danger" type="button" aria-label={`Remove item ${index+1}`} disabled={lines.length===1} onClick={()=>setLines(lines.filter((_,i)=>i!==index))}><Trash2 size={15}/></button></div>
         <CatalogPicker line={line} onPick={item=>pickVariant(index,item)}/>
         {line.variantId&&<div className="record-help"><strong>{displayName(line)}</strong> · Cost {money(line.unitCost||0)}</div>}
         {!line.variantId&&record&&<div className="record-help">Legacy manual item: {line.title||'No linked Shopify variant'}. Choose a Shopify item above if you want future quantity changes to update inventory.</div>}
         <div className="formgrid sale-line-grid">{[
-          {name:'quantity',label:'Quantity',type:'number',min:1,step:'1',required:true},{name:'gross',label:'Line sales before tax',type:'number',min:0,required:true},
+          {name:'quantity',label:'Quantity',type:'number',min:1,step:'1',required:true},{name:'gross',label:'Sale amount before tax',type:'number',min:0,required:true},
           {name:'discount',label:'Line discount',type:'number',min:0}
         ].map(field=><InputField key={field.name} field={field} value={line[field.name]} onChange={value=>lineChange(index,field.name,value)}/>)}</div>
       </div>)}
       <div className="record-section-heading"><h3>Shipping, tax & sale costs</h3></div>
-      <div className="formgrid"><InputField field={{name:'shippingRevenue',label:'Shipping charged',type:'number'}} value={values.shippingRevenue} onChange={value=>change('shippingRevenue',value)}/><InputField field={{name:'afterTax',label:'After-tax total',type:'number',min:0,step:'0.01'}} value={afterTaxOverride===''?defaultAfterTax:afterTaxOverride} onChange={value=>setAfterTaxOverride(value)}/></div>
-      <p className="record-help">After-tax total defaults to Ontario’s 13% HST. You can type over it manually. Current tax portion: {money(taxes)}.</p>
+      <div className="formgrid"><InputField field={{name:'shippingRevenue',label:'Shipping charged',type:'number'}} value={values.shippingRevenue} onChange={value=>change('shippingRevenue',value)}/><InputField field={{name:'afterTax',label:'After-tax total',type:'number',min:0,step:'0.01'}} value={afterTaxFieldValue} onChange={value=>{setAfterTaxTouched(true);setAfterTaxOverride(value);}}/></div>
+      <p className="record-help">After-tax total follows the sale amount at Ontario’s 13% HST unless you manually overwrite it. Current tax portion: {money(taxes)}.</p>
       <div className="formgrid">{[
         ['shippingCost','Shipping cost'],['paymentFees','Payment fees'],['materialCost','Packing materials'],['otherVariableCost','Other sale costs']
       ].map(([name,label])=><InputField key={name} field={{name,label,type:'number'}} value={values[name]} onChange={value=>change(name,value)}/>)}<InputField field={{name:'notes',label:'Notes',type:'textarea',wide:true}} value={values.notes} onChange={value=>change('notes',value)}/></div>
