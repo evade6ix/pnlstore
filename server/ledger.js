@@ -1,4 +1,5 @@
 import express from 'express';
+import crypto from 'node:crypto';
 import {cookieValue,verifyOwnerToken} from './owner-auth.js';
 import {Catalog} from './models.js';
 import {gql} from './shopify.js';
@@ -110,8 +111,8 @@ async function hydrateCatalogLines(body,shopName){
 const INVENTORY_LEVEL_QUERY=`query ManualSaleInventory($id: ID!) {
   inventoryItem(id: $id) { id tracked inventoryLevels(first: 100) { nodes { location { id name isActive } quantities(names:["available"]) { name quantity } } } }
 }`;
-const INVENTORY_ADJUST_MUTATION=`mutation ManualSaleAdjustInventory($input: InventoryAdjustQuantitiesInput!) {
-  inventoryAdjustQuantities(input:$input) { inventoryAdjustmentGroup { createdAt reason changes { name delta } } userErrors { field message } }
+const INVENTORY_ADJUST_MUTATION=`mutation ManualSaleAdjustInventory($input: InventoryAdjustQuantitiesInput!, $idempotencyKey: String!) {
+  inventoryAdjustQuantities(input:$input) @idempotent(key:$idempotencyKey) { inventoryAdjustmentGroup { createdAt reason changes { name delta } } userErrors { field message } }
 }`;
 function variantQuantities(lines=[]){
   const result=new Map();
@@ -131,10 +132,9 @@ async function adjustVariantInventory(shopName,variantId,soldDelta){
   if(!item?.tracked)throw ledgerError(`${record.title} is not tracking inventory in Shopify.`,409);
   const levels=(item.inventoryLevels?.nodes||[]).filter(level=>level.location?.isActive);
   if(!levels.length)throw ledgerError(`${record.title} has no active Shopify inventory location.`,409);
-  let remaining=-soldDelta;
   const changes=[];
-  if(remaining<0){
-    let need=-remaining;
+  if(soldDelta>0){
+    let need=soldDelta;
     for(const level of levels){
       if(need<=0)break;
       const available=Number(level.quantities?.find(q=>q.name==='available')?.quantity||0);
@@ -142,12 +142,12 @@ async function adjustVariantInventory(shopName,variantId,soldDelta){
       if(take>0){changes.push({delta:-take,inventoryItemId:record.inventoryItemId,locationId:level.location.id});need-=take;}
     }
     if(need>0)changes.push({delta:-need,inventoryItemId:record.inventoryItemId,locationId:levels[0].location.id});
-  }else if(remaining>0){
-    changes.push({delta:remaining,inventoryItemId:record.inventoryItemId,locationId:levels[0].location.id});
+  }else if(soldDelta<0){
+    changes.push({delta:-soldDelta,inventoryItemId:record.inventoryItemId,locationId:levels[0].location.id});
   }
   if(!changes.length)return;
   let result;
-  try{result=await gql(shopName,INVENTORY_ADJUST_MUTATION,{input:{name:'available',reason:'correction',changes}});}
+  try{result=await gql(shopName,INVENTORY_ADJUST_MUTATION,{input:{name:'available',reason:'correction',referenceDocumentUri:`gid://pnlstore/ManualSaleAdjustment/${crypto.randomUUID()}`,changes},idempotencyKey:crypto.randomUUID()});}
   catch(error){throw ledgerError(`Shopify could not confirm the inventory change for ${record.title}: ${error.message}`,502);}
   const errors=result.inventoryAdjustQuantities?.userErrors||[];
   if(errors.length)throw ledgerError(errors.map(error=>error.message).join('; '),409);
