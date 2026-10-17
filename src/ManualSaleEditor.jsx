@@ -45,11 +45,7 @@ export default function ManualSaleEditor({record,onClose,onSaved}){
   const net=useMemo(()=>lines.reduce((sum,line)=>sum+(Number(line.gross)||0)-(Number(line.discount)||0),0),[lines]);
   const taxableBase=net+(Number(values.shippingRevenue)||0);
   const defaultAfterTax=Math.round((taxableBase*1.13+Number.EPSILON)*100)/100;
-  const existingAfterTax=record?.totalCollected!=null?Number(record.totalCollected):defaultAfterTax;
-  const existingBase=(Number(record?.netSales)||0)+(Number(record?.shippingRevenue)||0);
-  const existingDefault=Math.round((existingBase*1.13+Number.EPSILON)*100)/100;
-  const hadCustomTax=!!record&&Math.abs(existingAfterTax-existingDefault)>0.01;
-  const afterTax=afterTaxTouched?Number(afterTaxOverride||0):(hadCustomTax?existingAfterTax:defaultAfterTax);
+  const afterTax=afterTaxTouched?Number(afterTaxOverride||0):defaultAfterTax;
   const taxes=Math.max(0,Math.round(((afterTax-taxableBase)+Number.EPSILON)*100)/100);
   const cogs=lines.reduce((sum,line)=>sum+(Number(line.unitCost)||0)*(Number(line.quantity)||0),0);
   const variable=['shippingCost','paymentFees','materialCost','otherVariableCost'].reduce((sum,key)=>sum+(Number(values[key])||0),0);
@@ -64,7 +60,7 @@ export default function ManualSaleEditor({record,onClose,onSaved}){
       const result=await api(`/api/manual-sales${record?`/${record._id}`:''}`,{method:record?'PATCH':'POST',body:JSON.stringify(body)});onSaved(result);
     }catch(error){setError(error.message);}finally{setBusy(false);}
   };
-  const afterTaxFieldValue=afterTaxTouched?afterTaxOverride:(hadCustomTax?existingAfterTax:defaultAfterTax);
+  const afterTaxFieldValue=afterTaxTouched?afterTaxOverride:defaultAfterTax;
   return <RecordDialog title={record?'Edit manual sale':'Add manual sale'} onClose={onClose} busy={busy} onSubmit={save} wide>
     <SignInNotice access={access}/>{error&&<div className="notice" role="alert">{error}</div>}
     <fieldset className="record-fieldset" disabled={busy||!access?.ownerAuthenticated}>
@@ -82,7 +78,7 @@ export default function ManualSaleEditor({record,onClose,onSaved}){
       </div>)}
       <div className="record-section-heading"><h3>Shipping, tax & sale costs</h3></div>
       <div className="formgrid"><InputField field={{name:'shippingRevenue',label:'Shipping charged',type:'number'}} value={values.shippingRevenue} onChange={value=>change('shippingRevenue',value)}/><InputField field={{name:'afterTax',label:'After-tax total',type:'number',min:0,step:'0.01'}} value={afterTaxFieldValue} onChange={value=>{setAfterTaxTouched(true);setAfterTaxOverride(value);}}/></div>
-      <p className="record-help">After-tax total follows the sale amount at Ontario’s 13% HST unless you manually overwrite it. Current tax portion: {money(taxes)}.</p>
+      <p className="record-help">After-tax total automatically follows the current sale amount at Ontario’s 13% HST. It only stops recalculating if you manually type over this field during the current edit.</p>
       <div className="formgrid">{[
         ['shippingCost','Shipping cost'],['paymentFees','Payment fees'],['materialCost','Packing materials'],['otherVariableCost','Other sale costs']
       ].map(([name,label])=><InputField key={name} field={{name,label,type:'number'}} value={values[name]} onChange={value=>change(name,value)}/>)}<InputField field={{name:'notes',label:'Notes',type:'textarea',wide:true}} value={values.notes} onChange={value=>change('notes',value)}/></div>
