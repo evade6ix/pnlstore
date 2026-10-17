@@ -1,5 +1,7 @@
 import express from 'express';
 import {cookieValue,verifyOwnerToken} from './owner-auth.js';
+import {Catalog} from './models.js';
+import {gql} from './shopify.js';
 
 export const ledgerError=(message,status=400)=>Object.assign(new Error(message),{status});
 const own=(o,k)=>Object.hasOwn(o,k);
@@ -76,7 +78,8 @@ export function manualSaleValues(body,current={}){
     const quantity=number(line.quantity,'Quantity',{min:1,max:1000000});
     if(!Number.isInteger(quantity))throw ledgerError('Quantity must be a whole number.');
     const gross=number(line.gross,'Line sales',{min:0}),discount=number(line.discount??0,'Line discount',{min:0,max:gross}),unitCost=number(line.unitCost??0,'Unit cost',{min:0});
-    return {title:text(line.title,`Item ${index+1} title`,true),variantTitle:text(line.variantTitle||'','Variant'),sku:text(line.sku||'','SKU'),quantity,gross:cash(gross),discount:cash(discount),net:cash(gross-discount),unitCost,cogs:cash(unitCost*quantity),costSource:'manual'};
+    const variantId=text(line.variantId||'','Variant ID'),productId=text(line.productId||'','Product ID');
+    return {productId,variantId,title:text(line.title,`Item ${index+1} title`,true),variantTitle:text(line.variantTitle||'','Variant'),sku:text(line.sku||'','SKU'),quantity,gross:cash(gross),discount:cash(discount),net:cash(gross-discount),unitCost,cogs:cash(unitCost*quantity),costSource:variantId?'catalog':'manual'};
   });
   for(const key of [...COST_FIELDS,'shippingRevenue','taxes'])set[key]=own(body,key)?number(body[key],key,COST_FIELDS.includes(key)?{}:{min:0}):current[key]||0;
   set.notes=own(body,'notes')?text(body.notes,'Notes'):current.notes||'';
@@ -87,6 +90,79 @@ export function manualSaleValues(body,current={}){
   set.totalCollected=cash(set.netSales+set.shippingRevenue+set.taxes);
   return set;
 }
+
+async function hydrateCatalogLines(body,shopName){
+  if(!Array.isArray(body?.lines))return body;
+  const ids=[...new Set(body.lines.map(line=>line?.variantId).filter(Boolean))];
+  if(!ids.length)return body;
+  if(ids.some(id=>!/^gid:\/\/shopify\/ProductVariant\/\d+$/.test(id)))throw ledgerError('Invalid Shopify variant selected.');
+  const records=await Catalog.find({shop:shopName,variantId:{$in:ids}}).lean();
+  const byId=new Map(records.map(record=>[record.variantId,record]));
+  const lines=body.lines.map((line,index)=>{
+    if(!line.variantId)return line;
+    const item=byId.get(line.variantId);
+    if(!item)throw ledgerError(`Item ${index+1} is no longer in the Shopify catalog. Refresh products and choose it again.`,409);
+    return {...line,productId:item.productId,title:item.title,variantTitle:item.variantTitle,sku:item.sku||'',unitCost:item.unitCost??0};
+  });
+  return {...body,lines};
+}
+
+const INVENTORY_LEVEL_QUERY=`query ManualSaleInventory($id: ID!) {
+  inventoryItem(id: $id) { id tracked inventoryLevels(first: 100) { nodes { location { id name isActive } quantities(names:["available"]) { name quantity } } } }
+}`;
+const INVENTORY_ADJUST_MUTATION=`mutation ManualSaleAdjustInventory($input: InventoryAdjustQuantitiesInput!) {
+  inventoryAdjustQuantities(input:$input) { inventoryAdjustmentGroup { createdAt reason changes { name delta } } userErrors { field message } }
+}`;
+function variantQuantities(lines=[]){
+  const result=new Map();
+  for(const line of lines)if(line.variantId)result.set(line.variantId,(result.get(line.variantId)||0)+Number(line.quantity||0));
+  return result;
+}
+function saleInventoryDeltas(previousLines,nextLines){
+  const before=variantQuantities(previousLines),after=variantQuantities(nextLines),ids=new Set([...before.keys(),...after.keys()]);
+  return [...ids].map(variantId=>({variantId,soldDelta:(after.get(variantId)||0)-(before.get(variantId)||0)})).filter(item=>item.soldDelta!==0);
+}
+async function adjustVariantInventory(shopName,variantId,soldDelta){
+  const record=await Catalog.findOne({shop:shopName,variantId}).lean();
+  if(!record)throw ledgerError('A selected Shopify item is no longer available. Refresh products and try again.',409);
+  if(!record.tracked||!record.inventoryItemId)throw ledgerError(`${record.title}${record.variantTitle&&record.variantTitle!=='Default Title'?` - ${record.variantTitle}`:''} is not tracking inventory in Shopify.`,409);
+  const data=await gql(shopName,INVENTORY_LEVEL_QUERY,{id:record.inventoryItemId});
+  const item=data.inventoryItem;
+  if(!item?.tracked)throw ledgerError(`${record.title} is not tracking inventory in Shopify.`,409);
+  const levels=(item.inventoryLevels?.nodes||[]).filter(level=>level.location?.isActive);
+  if(!levels.length)throw ledgerError(`${record.title} has no active Shopify inventory location.`,409);
+  let remaining=-soldDelta;
+  const changes=[];
+  if(remaining<0){
+    let need=-remaining;
+    for(const level of levels){
+      if(need<=0)break;
+      const available=Number(level.quantities?.find(q=>q.name==='available')?.quantity||0);
+      const take=Math.min(Math.max(0,available),need);
+      if(take>0){changes.push({delta:-take,inventoryItemId:record.inventoryItemId,locationId:level.location.id});need-=take;}
+    }
+    if(need>0)changes.push({delta:-need,inventoryItemId:record.inventoryItemId,locationId:levels[0].location.id});
+  }else if(remaining>0){
+    changes.push({delta:remaining,inventoryItemId:record.inventoryItemId,locationId:levels[0].location.id});
+  }
+  if(!changes.length)return;
+  let result;
+  try{result=await gql(shopName,INVENTORY_ADJUST_MUTATION,{input:{name:'available',reason:'correction',changes}});}
+  catch(error){throw ledgerError(`Shopify could not confirm the inventory change for ${record.title}: ${error.message}`,502);}
+  const errors=result.inventoryAdjustQuantities?.userErrors||[];
+  if(errors.length)throw ledgerError(errors.map(error=>error.message).join('; '),409);
+  await Catalog.updateOne({shop:shopName,variantId},{$inc:{quantity:-soldDelta}});
+}
+async function applyInventoryDeltas(shopName,deltas){
+  const applied=[];
+  try{
+    for(const delta of deltas){await adjustVariantInventory(shopName,delta.variantId,delta.soldDelta);applied.push(delta);}
+  }catch(error){
+    for(const delta of applied.reverse())try{await adjustVariantInventory(shopName,delta.variantId,-delta.soldDelta);}catch(rollbackError){console.error('Manual sale inventory rollback:',rollbackError.message);}
+    throw error;
+  }
+}
+
 export async function updateLedgerRecord(Model,id,body,build,{source}={}){
   if(!/^[a-f\d]{24}$/i.test(id))throw ledgerError('Record not found.',404);
   const filter={_id:id,...(source?{source}:{})};
@@ -118,8 +194,25 @@ export function createLedgerRouter({Order,Expense,Purchase,Cost,shop,secret,appU
     }));
   }
   router.patch('/orders/:id',wrap(async(req,res)=>res.json(await updateLedgerRecord(Order,req.params.id,req.body,orderCostValues))));
-  router.post('/manual-sales',wrap(async(req,res)=>res.status(201).json(await Order.create({...manualSaleValues(req.body),orderNumber:`MAN-${Date.now()}`}))));
-  router.patch('/manual-sales/:id',wrap(async(req,res)=>res.json(await updateLedgerRecord(Order,req.params.id,req.body,(current,body)=>manualSaleValues(body,current),{source:'manual'}))));
+  router.post('/manual-sales',wrap(async(req,res)=>{
+    const hydrated=await hydrateCatalogLines(req.body,shop());
+    const values=manualSaleValues(hydrated),deltas=saleInventoryDeltas([],values.lines);
+    await applyInventoryDeltas(shop(),deltas);
+    try{return res.status(201).json(await Order.create({...values,orderNumber:`MAN-${Date.now()}`}));}
+    catch(error){await applyInventoryDeltas(shop(),deltas.map(delta=>({...delta,soldDelta:-delta.soldDelta}))).catch(rollbackError=>console.error('Manual sale create rollback:',rollbackError.message));throw error;}
+  }));
+  router.patch('/manual-sales/:id',wrap(async(req,res)=>{
+    if(!/^[a-f\d]{24}$/i.test(req.params.id))throw ledgerError('Record not found.',404);
+    const current=await Order.findOne({_id:req.params.id,source:'manual'}).lean();if(!current)throw ledgerError('Record not found.',404);
+    if(typeof req.body.expectedUpdatedAt!=='string'||!Number.isFinite(Date.parse(req.body.expectedUpdatedAt)))throw ledgerError('Reload this record before saving.');
+    const hydrated=await hydrateCatalogLines(req.body,shop()),set=manualSaleValues(hydrated,current),deltas=saleInventoryDeltas(current.lines,set.lines);
+    await applyInventoryDeltas(shop(),deltas);
+    try{
+      const result=await Order.findOneAndUpdate({_id:req.params.id,source:'manual',updatedAt:new Date(req.body.expectedUpdatedAt)},{$set:set},{new:true,runValidators:true});
+      if(!result)throw ledgerError('This record changed since you opened it. Reload it before saving.',409);
+      return res.json(result);
+    }catch(error){await applyInventoryDeltas(shop(),deltas.map(delta=>({...delta,soldDelta:-delta.soldDelta}))).catch(rollbackError=>console.error('Manual sale edit rollback:',rollbackError.message));throw error;}
+  }));
   return router;
 }
 
