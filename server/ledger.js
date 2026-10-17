@@ -132,18 +132,23 @@ async function adjustVariantInventory(shopName,variantId,soldDelta){
   if(!item?.tracked)throw ledgerError(`${record.title} is not tracking inventory in Shopify.`,409);
   const levels=(item.inventoryLevels?.nodes||[]).filter(level=>level.location?.isActive);
   if(!levels.length)throw ledgerError(`${record.title} has no active Shopify inventory location.`,409);
+  const availableAt=level=>Number(level.quantities?.find(q=>q.name==='available')?.quantity||0);
   const changes=[];
   if(soldDelta>0){
     let need=soldDelta;
     for(const level of levels){
       if(need<=0)break;
-      const available=Number(level.quantities?.find(q=>q.name==='available')?.quantity||0);
-      const take=Math.min(Math.max(0,available),need);
-      if(take>0){changes.push({delta:-take,inventoryItemId:record.inventoryItemId,locationId:level.location.id});need-=take;}
+      const available=availableAt(level),take=Math.min(Math.max(0,available),need);
+      if(take>0){changes.push({delta:-take,changeFromQuantity:available,inventoryItemId:record.inventoryItemId,locationId:level.location.id});need-=take;}
     }
-    if(need>0)changes.push({delta:-need,inventoryItemId:record.inventoryItemId,locationId:levels[0].location.id});
+    if(need>0){
+      const first=levels[0],available=availableAt(first),existing=changes.find(change=>change.locationId===first.location.id);
+      if(existing)existing.delta-=need;
+      else changes.push({delta:-need,changeFromQuantity:available,inventoryItemId:record.inventoryItemId,locationId:first.location.id});
+    }
   }else if(soldDelta<0){
-    changes.push({delta:-soldDelta,inventoryItemId:record.inventoryItemId,locationId:levels[0].location.id});
+    const level=levels[0],available=availableAt(level);
+    changes.push({delta:-soldDelta,changeFromQuantity:available,inventoryItemId:record.inventoryItemId,locationId:level.location.id});
   }
   if(!changes.length)return;
   let result;
