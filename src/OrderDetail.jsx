@@ -4,6 +4,7 @@ import {Pencil,Save,RefreshCw,ExternalLink,Trash2} from 'lucide-react';
 import {api,money,pct,dateFmt} from './api.js';
 import {InputField,SignInNotice} from './LedgerRecords.jsx';
 import ManualSaleEditor from './ManualSaleEditor.jsx';
+import PaymentStatus from './PaymentStatus.jsx';
 
 export default function OrderDetail(){
   const {id}=useParams(),navigate=useNavigate(),[order,setOrder]=useState(null),[access,setAccess]=useState(null),[error,setError]=useState(''),[editing,setEditing]=useState(false),[message,setMessage]=useState(''),[deleting,setDeleting]=useState(false);
@@ -20,7 +21,7 @@ export default function OrderDetail(){
     catch(error){setError(error.message);setDeleting(false);}
   };
   return <>
-    <header><div><h1>{order.name||order.orderNumber}</h1><p>{dateFmt(order.createdAtShopify)} · {order.source==='manual'?'Manual sale':'Shopify order'}</p></div><div className="actions">
+    <header><div><div className="order-name-payment"><h1>{order.name||order.orderNumber}</h1><PaymentStatus order={order} onSaved={setOrder}/></div><p>{dateFmt(order.createdAtShopify)} · {order.source==='manual'?'Manual sale':'Shopify order'}</p></div><div className="actions">
       {order.source==='manual'?<><button onClick={()=>setEditing(true)} disabled={deleting}><Pencil size={15}/>Edit sale</button><button className="secondary danger" onClick={remove} disabled={deleting||!access?.ownerAuthenticated}>{deleting?<RefreshCw size={15} className="spin"/>:<Trash2 size={15}/>} {deleting?'Deleting…':'Delete sale'}</button></>:shopifyOrderId&&access?.shop&&<a className="secondary button" href={`https://${access.shop}/admin/orders/${shopifyOrderId}`} target="_blank" rel="noopener noreferrer"><ExternalLink size={15}/>Open in Shopify</a>}
       <NavLink className="secondary button" to="/orders">Back to orders</NavLink></div></header>
     <SignInNotice access={access}/>{error&&<div className="notice" role="alert">{error}</div>}{message&&<div className="inventory-note inventory-saved" role="status">{message}</div>}
@@ -50,3 +51,4 @@ function OrderCosts({order,access,onSaved}){
     </div>
   </form>;
 }
+

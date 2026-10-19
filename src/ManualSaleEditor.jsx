@@ -27,7 +27,7 @@ function CatalogPicker({line,onPick}){
 }
 export default function ManualSaleEditor({record,onClose,onSaved}){
   const [access,setAccess]=useState(null),[busy,setBusy]=useState(false),[error,setError]=useState('');
-  const [values,setValues]=useState(()=>({name:record?.name||'Manual sale',date:record?.createdAtShopify?.slice(0,10)||new Date().toISOString().slice(0,10),
+  const [values,setValues]=useState(()=>({paymentStatus:record?.paymentStatus||'',name:record?.name||'Manual sale',date:record?.createdAtShopify?.slice(0,10)||new Date().toISOString().slice(0,10),
     shippingRevenue:record?.shippingRevenue??0,shippingCost:record?.shippingCost??0,paymentFees:record?.paymentFees??0,materialCost:record?.materialCost??0,otherVariableCost:record?.otherVariableCost??0,notes:record?.notes||''}));
   const [lines,setLines]=useState(()=>record?.lines?.map(line=>({...line,unitPrice:Number(line.quantity)?Number(line.gross||0)/Number(line.quantity):0,autoPrice:false}))||[blankLine()]);
   const [afterTaxOverride,setAfterTaxOverride]=useState('');
@@ -55,7 +55,7 @@ export default function ManualSaleEditor({record,onClose,onSaved}){
     try{
       if(!record&&lines.some(line=>!line.variantId))throw new Error('Choose the Shopify item and variant for every sale line.');
       if(afterTax<taxableBase)throw new Error('After-tax total cannot be lower than the product sales plus shipping charged.');
-      const body={...values,taxes,lines:lines.map(({unitPrice,autoPrice,...line})=>({...line,quantity:Number(line.quantity),gross:Number(line.gross),discount:Number(line.discount||0),unitCost:Number(line.unitCost||0)}))};
+      const body={...values,paymentStatus:values.paymentStatus||null,taxes,lines:lines.map(({unitPrice,autoPrice,...line})=>({...line,quantity:Number(line.quantity),gross:Number(line.gross),discount:Number(line.discount||0),unitCost:Number(line.unitCost||0)}))};
       if(record)body.expectedUpdatedAt=record.updatedAt;
       const result=await api(`/api/manual-sales${record?`/${record._id}`:''}`,{method:record?'PATCH':'POST',body:JSON.stringify(body)});onSaved(result);
     }catch(error){setError(error.message);}finally{setBusy(false);}
@@ -65,6 +65,7 @@ export default function ManualSaleEditor({record,onClose,onSaved}){
     <SignInNotice access={access}/>{error&&<div className="notice" role="alert">{error}</div>}
     <fieldset className="record-fieldset" disabled={busy||!access?.ownerAuthenticated}>
       <div className="formgrid"><InputField field={{name:'name',label:'Sale name',required:true}} value={values.name} onChange={value=>change('name',value)}/><InputField field={{name:'date',label:'Sale date',type:'date',required:true}} value={values.date} onChange={value=>change('date',value)}/></div>
+      <label className="field"><span>Payment status</span><select value={values.paymentStatus} onChange={event=>change('paymentStatus',event.target.value)}><option value="">Not set</option><option value="paid">Paid</option><option value="unpaid">Unpaid</option></select></label>
       <div className="record-section-heading"><h3>Sale items</h3><button className="secondary" type="button" onClick={()=>setLines([...lines,blankLine()])}><Plus size={14}/>Add item</button></div>
       <p className="record-help">Choose the exact Shopify product variant sold. Its current Shopify cost is copied into the sale and the sold quantity is removed from Shopify inventory when you save.</p>
       {lines.map((line,index)=><div className="sale-line-card" key={line.variantId||index}><div className="sale-line-heading"><strong>Item {index+1}</strong><button className="icon danger" type="button" aria-label={`Remove item ${index+1}`} disabled={lines.length===1} onClick={()=>setLines(lines.filter((_,i)=>i!==index))}><Trash2 size={15}/></button></div>
@@ -87,3 +88,4 @@ export default function ManualSaleEditor({record,onClose,onSaved}){
     <SaveActions busy={busy} disabled={!access?.ownerAuthenticated} onClose={onClose} label={record?'Save sale changes':'Add manual sale'}/>
   </RecordDialog>;
 }
+

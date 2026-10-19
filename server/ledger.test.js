@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
-import {createLedgerRouter,ledgerValues,ledgerDate,manualSaleValues,orderCostValues,historicalLineCost} from './ledger.js';
+import {createLedgerRouter,ledgerValues,ledgerDate,manualSaleValues,orderCostValues,orderPaymentValues,historicalLineCost} from './ledger.js';
 import {ownerToken} from './owner-auth.js';
 
 const date=new Date('2026-10-10T00:00:00Z'),stamp=new Date('2026-10-15T12:00:00Z');
@@ -78,4 +78,23 @@ test('ledger APIs save edits on the same record, reject stale edits and require 
   const stale=await fetch(`${base}/api/expenses/${id}`,{method:'PATCH',headers,body:JSON.stringify({...body,amount:999})});assert.equal(stale.status,409);assert.equal(Expense.records[0].amount,75);
   const crossOrigin=await fetch(`${base}/api/expenses/${id}`,{method:'PATCH',headers:{...headers,Origin:'http://elsewhere.example'},body:JSON.stringify(body)});assert.equal(crossOrigin.status,403);
   const sale=await fetch(`${base}/api/manual-sales/${id}`,{method:'PATCH',headers,body:JSON.stringify({expectedUpdatedAt:stamp.toISOString(),name:'Updated sale',date:'2026-10-12',lines:[{title:'New item',quantity:2,gross:40,discount:5,unitCost:10}],shippingRevenue:5,taxes:4})});assert.equal(sale.status,200);const saleRecord=await sale.json();assert.equal(saleRecord.orderNumber,'MAN-1');assert.equal(saleRecord.netSales,35);assert.equal(saleRecord.totalCollected,44);assert.equal(saleRecord.cogs,20);assert.equal(Order.records.length,1);
+  const paymentBody={expectedUpdatedAt:saleRecord.updatedAt,paymentStatus:'unpaid'};
+  const deniedPayment=await fetch(`${base}/api/orders/${id}`,{method:'PATCH',headers:{'Content-Type':'application/json',Origin:origin},body:JSON.stringify(paymentBody)});assert.equal(deniedPayment.status,401);
+  const invalidPayment=await fetch(`${base}/api/orders/${id}`,{method:'PATCH',headers,body:JSON.stringify({...paymentBody,paymentStatus:'invalid'})});assert.equal(invalidPayment.status,400);
+  const paymentSave=await fetch(`${base}/api/orders/${id}`,{method:'PATCH',headers,body:JSON.stringify(paymentBody)});assert.equal(paymentSave.status,200);
+  const paymentRecord=await paymentSave.json();assert.equal(paymentRecord.paymentStatus,'unpaid');assert.equal(paymentRecord.netSales,35);assert.equal(paymentRecord.cogs,20);assert.equal(paymentRecord.totalCollected,44);
+});
+
+
+test('payment changes validate independently and leave financial totals and imported status alone',()=>{
+  assert.deepEqual(orderPaymentValues({paymentStatus:'paid'}),{paymentStatus:'paid'});
+  assert.deepEqual(orderPaymentValues({paymentStatus:'unpaid'}),{paymentStatus:'unpaid'});
+  assert.deepEqual(orderPaymentValues({paymentStatus:null}),{paymentStatus:null});
+  assert.deepEqual(orderPaymentValues({}),{});
+  for(const value of ['PAID','pending','',true,1,{},[]])assert.throws(()=>orderPaymentValues({paymentStatus:value}));
+  assert.deepEqual(orderCostValues({lines:[]},{paymentStatus:'unpaid',financialStatus:'PAID',netSales:999}),{paymentStatus:'unpaid'});
+  const body={name:'Event',date:'2026-10-19',paymentStatus:'unpaid',lines:[{title:'Item',quantity:1,gross:20,unitCost:10}]};
+  assert.equal(manualSaleValues(body).paymentStatus,'unpaid');
+  const {paymentStatus,...omitted}=body;
+  assert.equal(manualSaleValues(omitted,{source:'manual',paymentStatus:'paid'}).paymentStatus,undefined);
 });
