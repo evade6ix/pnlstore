@@ -53,7 +53,7 @@ test('order cost edits preserve other imported fields and snapshot sources until
 
 function memoryModel(seed=[]){
   const records=seed.map(record=>({...record}));let counter=10;
-  const match=(record,filter)=>Object.entries(filter).every(([key,value])=>value instanceof Date?new Date(record[key]).getTime()===value.getTime():record[key]===value);
+  const match=(record,filter)=>Object.entries(filter).every(([key,value])=>value instanceof Date?new Date(record[key]).getTime()===value.getTime():value===null?record[key]==null:record[key]===value);
   return {records,
     find:()=>({sort:()=>({lean:async()=>records})}),
     findOne:filter=>({lean:async()=>records.find(record=>match(record,filter))||null}),

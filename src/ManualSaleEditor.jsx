@@ -3,7 +3,7 @@ import {Plus,Trash2} from 'lucide-react';
 import {api,money} from './api.js';
 import {InputField,RecordDialog,SaveActions,SignInNotice} from './LedgerRecords.jsx';
 
-const blankLine=()=>({productId:'',variantId:'',title:'',variantTitle:'',sku:'',quantity:1,gross:0,discount:0,unitCost:0,unitPrice:0,autoPrice:true});
+const blankLine=()=>({clientKey:crypto.randomUUID(),productId:'',variantId:'',title:'',variantTitle:'',sku:'',quantity:1,gross:0,discount:0,unitCost:0,unitPrice:0,unitDiscount:0,autoPrice:true});
 const displayName=item=>`${item.title}${item.variantTitle&&item.variantTitle!=='Default Title'?` — ${item.variantTitle}`:''}${item.sku?` (${item.sku})`:''}`;
 function CatalogPicker({line,onPick}){
   const [query,setQuery]=useState(line.variantId?displayName(line):''),[items,setItems]=useState([]),[loading,setLoading]=useState(false),[error,setError]=useState('');
@@ -25,11 +25,19 @@ function CatalogPicker({line,onPick}){
     {error&&<small className="negative">{error}</small>}
   </div>;
 }
-export default function ManualSaleEditor({record,onClose,onSaved}){
+export default function ManualSaleEditor({record,onClose,onSaved,addItem=false}){
   const [access,setAccess]=useState(null),[busy,setBusy]=useState(false),[error,setError]=useState('');
   const [values,setValues]=useState(()=>({paymentStatus:record?.paymentStatus||'',name:record?.name||'Manual sale',date:record?.createdAtShopify?.slice(0,10)||new Date().toISOString().slice(0,10),
     shippingRevenue:record?.shippingRevenue??0,shippingCost:record?.shippingCost??0,paymentFees:record?.paymentFees??0,materialCost:record?.materialCost??0,otherVariableCost:record?.otherVariableCost??0,notes:record?.notes||''}));
-  const [lines,setLines]=useState(()=>record?.lines?.map(line=>({...line,unitPrice:Number(line.quantity)?Number(line.gross||0)/Number(line.quantity):0,autoPrice:false}))||[blankLine()]);
+  const [lines,setLines]=useState(()=>{
+    const existing=record?.lines?.map((line,originalIndex)=>({...line,originalIndex,clientKey:crypto.randomUUID(),unitPrice:Number(line.quantity)?Number(line.gross||0)/Number(line.quantity):0,unitDiscount:Number(line.quantity)?Number(line.discount||0)/Number(line.quantity):0,autoPrice:true}))||[];
+    return existing.length?(addItem?[...existing,blankLine()]:existing):[blankLine()];
+  });
+  const [restockChoices,setRestockChoices]=useState({});
+  const reductions=(record?.lines||[]).map((line,index)=>{
+    const retained=lines.find(item=>item.originalIndex===index);
+    return {...line,index,removed:line.quantity-(Number(retained?.quantity)||0)};
+  }).filter(line=>line.removed>0);
   const [afterTaxOverride,setAfterTaxOverride]=useState('');
   const [afterTaxTouched,setAfterTaxTouched]=useState(false);
   useEffect(()=>{api('/api/status').then(setAccess).catch(error=>setError(error.message));},[]);
@@ -38,7 +46,8 @@ export default function ManualSaleEditor({record,onClose,onSaved}){
     if(i!==index)return line;
     const next={...line,[key]:value};
     if(key==='gross')next.autoPrice=false;
-    if(key==='quantity'&&line.autoPrice)next.gross=(Number(value)||0)*(Number(line.unitPrice)||0);
+    if(key==='discount')next.unitDiscount=(Number(value)||0)/(Number(line.quantity)||1);
+    if(key==='quantity'&&line.autoPrice){next.gross=Math.round(((Number(value)||0)*(Number(line.unitPrice)||0)+Number.EPSILON)*100)/100;next.discount=Math.round(((Number(value)||0)*(Number(line.unitDiscount)||0)+Number.EPSILON)*100)/100;}
     return next;
   }));
   const pickVariant=(index,item)=>setLines(previous=>previous.map((line,i)=>i===index?{...line,productId:item.productId,variantId:item.variantId,title:item.title,variantTitle:item.variantTitle,sku:item.sku||'',unitCost:item.unitCost??0,unitPrice:item.price??0,gross:(item.price??0)*(Number(line.quantity)||1),autoPrice:true}:line));
@@ -53,9 +62,10 @@ export default function ManualSaleEditor({record,onClose,onSaved}){
   const save=async event=>{
     event.preventDefault();setBusy(true);setError('');
     try{
-      if(!record&&lines.some(line=>!line.variantId))throw new Error('Choose the Shopify item and variant for every sale line.');
+      if(lines.some(line=>line.originalIndex==null&&!line.variantId))throw new Error('Choose the Shopify item and variant for every sale line.');
+      if(reductions.some(line=>line.variantId&&typeof restockChoices[line.index]!=='boolean'))throw new Error('Choose whether each removed item should return to inventory.');
       if(afterTax<taxableBase)throw new Error('After-tax total cannot be lower than the product sales plus shipping charged.');
-      const body={...values,paymentStatus:values.paymentStatus||null,taxes,lines:lines.map(({unitPrice,autoPrice,...line})=>({...line,quantity:Number(line.quantity),gross:Number(line.gross),discount:Number(line.discount||0),unitCost:Number(line.unitCost||0)}))};
+      const body={...values,paymentStatus:values.paymentStatus||null,taxes,restockChoices:reductions.filter(line=>line.variantId).map(line=>({index:line.index,restock:restockChoices[line.index]})),lines:lines.map(({unitPrice,unitDiscount,autoPrice,clientKey,...line})=>({...line,quantity:Number(line.quantity),gross:Number(line.gross),discount:Number(line.discount||0),unitCost:Number(line.unitCost||0)}))};
       if(record)body.expectedUpdatedAt=record.updatedAt;
       const result=await api(`/api/manual-sales${record?`/${record._id}`:''}`,{method:record?'PATCH':'POST',body:JSON.stringify(body)});onSaved(result);
     }catch(error){setError(error.message);}finally{setBusy(false);}
@@ -67,16 +77,19 @@ export default function ManualSaleEditor({record,onClose,onSaved}){
       <div className="formgrid"><InputField field={{name:'name',label:'Sale name',required:true}} value={values.name} onChange={value=>change('name',value)}/><InputField field={{name:'date',label:'Sale date',type:'date',required:true}} value={values.date} onChange={value=>change('date',value)}/></div>
       <label className="field"><span>Payment status</span><select value={values.paymentStatus} onChange={event=>change('paymentStatus',event.target.value)}><option value="">Not set</option><option value="paid">Paid</option><option value="unpaid">Unpaid</option></select></label>
       <div className="record-section-heading"><h3>Sale items</h3><button className="secondary" type="button" onClick={()=>setLines([...lines,blankLine()])}><Plus size={14}/>Add item</button></div>
-      <p className="record-help">Choose the exact Shopify product variant sold. Its current Shopify cost is copied into the sale and the sold quantity is removed from Shopify inventory when you save.</p>
-      {lines.map((line,index)=><div className="sale-line-card" key={line.variantId||index}><div className="sale-line-heading"><strong>Item {index+1}</strong><button className="icon danger" type="button" aria-label={`Remove item ${index+1}`} disabled={lines.length===1} onClick={()=>setLines(lines.filter((_,i)=>i!==index))}><Trash2 size={15}/></button></div>
-        <CatalogPicker line={line} onPick={item=>pickVariant(index,item)}/>
+      <p className="record-help">Choose the exact Shopify product variant sold. New items use their current Shopify cost and are removed from inventory when you save. Existing items retain their saved costs.</p>
+      {lines.map((line,index)=><div className="sale-line-card" key={line.clientKey}><div className="sale-line-heading"><strong>Item {index+1}</strong><button className="icon danger" type="button" aria-label={`Remove item ${index+1}`} disabled={lines.length===1} title={lines.length===1?'Use Cancel / remove sale to remove the last item':'Remove this item; choose inventory return below'} onClick={()=>setLines(lines.filter((_,i)=>i!==index))}><Trash2 size={15}/></button></div>
+        {line.originalIndex==null?<CatalogPicker line={line} onPick={item=>pickVariant(index,item)}/>:<p className="record-help">To replace this item, remove it and use Add item.</p>}
         {line.variantId&&<div className="record-help"><strong>{displayName(line)}</strong> · Cost {money(line.unitCost||0)}</div>}
-        {!line.variantId&&record&&<div className="record-help">Legacy manual item: {line.title||'No linked Shopify variant'}. Choose a Shopify item above if you want future quantity changes to update inventory.</div>}
+        {!line.variantId&&line.originalIndex!=null&&<div className="record-help">Legacy manual item: {line.title||'No linked Shopify variant'}. This item is not linked to inventory.</div>}
         <div className="formgrid sale-line-grid">{[
           {name:'quantity',label:'Quantity',type:'number',min:1,step:'1',required:true},{name:'gross',label:'Sale amount before tax',type:'number',min:0,required:true},
           {name:'discount',label:'Line discount',type:'number',min:0}
         ].map(field=><InputField key={field.name} field={field} value={line[field.name]} onChange={value=>lineChange(index,field.name,value)}/>)}</div>
       </div>)}
+      {reductions.length>0&&<section className="inventory-return-review"><h3>Removed items — inventory return</h3><p className="record-help">Choose whether each removed quantity should go back into inventory when you save.</p><div className="actions"><button type="button" className="secondary" onClick={()=>setRestockChoices(Object.fromEntries(reductions.map(line=>[line.index,true])))}>Return all</button><button type="button" className="secondary" onClick={()=>setRestockChoices(Object.fromEntries(reductions.map(line=>[line.index,false])))}>Return none</button></div>
+        {reductions.map(line=><div className="sale-line-card" key={line.index}><strong>{displayName(line)} · {line.removed} removed</strong>{line.variantId?<label className="field"><span>Return removed quantity to inventory?</span><select required value={restockChoices[line.index]===undefined?'':String(restockChoices[line.index])} onChange={event=>setRestockChoices({...restockChoices,[line.index]:event.target.value==='true'})}><option value="" disabled>Choose…</option><option value="true">Yes — return {line.removed} to inventory</option><option value="false">No — leave inventory unchanged</option></select></label>:<p className="record-help">No linked Shopify variant; inventory cannot be returned automatically.</p>}</div>)}
+      </section>}
       <div className="record-section-heading"><h3>Shipping, tax & sale costs</h3></div>
       <div className="formgrid"><InputField field={{name:'shippingRevenue',label:'Shipping charged',type:'number'}} value={values.shippingRevenue} onChange={value=>change('shippingRevenue',value)}/><InputField field={{name:'afterTax',label:'After-tax total',type:'number',min:0,step:'0.01'}} value={afterTaxFieldValue} onChange={value=>{setAfterTaxTouched(true);setAfterTaxOverride(value);}}/></div>
       <p className="record-help">After-tax total automatically follows the current sale amount at Ontario’s 13% HST. It only stops recalculating if you manually type over this field during the current edit.</p>
