@@ -3,7 +3,7 @@ import {Plus,Trash2} from 'lucide-react';
 import {api,money} from './api.js';
 import {InputField,RecordDialog,SaveActions,SignInNotice} from './LedgerRecords.jsx';
 
-const blankLine=()=>({clientKey:crypto.randomUUID(),productId:'',variantId:'',title:'',variantTitle:'',sku:'',quantity:1,gross:0,discount:0,unitCost:0,unitPrice:0,unitDiscount:0,autoPrice:true});
+const blankLine=()=>({clientKey:crypto.randomUUID(),entryMode:'catalog',productId:'',variantId:'',title:'',variantTitle:'',sku:'',quantity:1,gross:0,discount:0,unitCost:0,unitPrice:0,unitDiscount:0,autoPrice:true});
 const displayName=item=>`${item.title}${item.variantTitle&&item.variantTitle!=='Default Title'?` — ${item.variantTitle}`:''}${item.sku?` (${item.sku})`:''}`;
 function CatalogPicker({line,onPick}){
   const [query,setQuery]=useState(line.variantId?displayName(line):''),[items,setItems]=useState([]),[loading,setLoading]=useState(false),[error,setError]=useState('');
@@ -30,7 +30,7 @@ export default function ManualSaleEditor({record,onClose,onSaved,addItem=false})
   const [values,setValues]=useState(()=>({paymentStatus:record?.paymentStatus||'',name:record?.name||'Manual sale',date:record?.createdAtShopify?.slice(0,10)||new Date().toISOString().slice(0,10),
     shippingRevenue:record?.shippingRevenue??0,shippingCost:record?.shippingCost??0,paymentFees:record?.paymentFees??0,materialCost:record?.materialCost??0,otherVariableCost:record?.otherVariableCost??0,notes:record?.notes||''}));
   const [lines,setLines]=useState(()=>{
-    const existing=record?.lines?.map((line,originalIndex)=>({...line,originalIndex,clientKey:crypto.randomUUID(),unitPrice:Number(line.quantity)?Number(line.gross||0)/Number(line.quantity):0,unitDiscount:Number(line.quantity)?Number(line.discount||0)/Number(line.quantity):0,autoPrice:true}))||[];
+    const existing=record?.lines?.map((line,originalIndex)=>({...line,originalIndex,entryMode:line.variantId?'catalog':'custom',clientKey:crypto.randomUUID(),unitPrice:Number(line.quantity)?Number(line.gross||0)/Number(line.quantity):0,unitDiscount:Number(line.quantity)?Number(line.discount||0)/Number(line.quantity):0,autoPrice:true}))||[];
     return existing.length?(addItem?[...existing,blankLine()]:existing):[blankLine()];
   });
   const [restockChoices,setRestockChoices]=useState({});
@@ -50,7 +50,11 @@ export default function ManualSaleEditor({record,onClose,onSaved,addItem=false})
     if(key==='quantity'&&line.autoPrice){next.gross=Math.round(((Number(value)||0)*(Number(line.unitPrice)||0)+Number.EPSILON)*100)/100;next.discount=Math.round(((Number(value)||0)*(Number(line.unitDiscount)||0)+Number.EPSILON)*100)/100;}
     return next;
   }));
-  const pickVariant=(index,item)=>setLines(previous=>previous.map((line,i)=>i===index?{...line,productId:item.productId,variantId:item.variantId,title:item.title,variantTitle:item.variantTitle,sku:item.sku||'',unitCost:item.unitCost??0,unitPrice:item.price??0,gross:(item.price??0)*(Number(line.quantity)||1),autoPrice:true}:line));
+  const setEntryMode=(index,entryMode)=>setLines(previous=>previous.map((line,i)=>i===index?{
+    ...line,entryMode,
+    ...(entryMode==='custom'?{productId:'',variantId:'',title:'',variantTitle:'',sku:'',unitCost:0,unitPrice:0,gross:0,autoPrice:false}:{productId:'',variantId:'',title:'',variantTitle:'',sku:'',unitCost:0,unitPrice:0,gross:0,autoPrice:true})
+  }:line));
+  const pickVariant=(index,item)=>setLines(previous=>previous.map((line,i)=>i===index?{...line,entryMode:'catalog',productId:item.productId,variantId:item.variantId,title:item.title,variantTitle:item.variantTitle,sku:item.sku||'',unitCost:item.unitCost??0,unitPrice:item.price??0,gross:(item.price??0)*(Number(line.quantity)||1),autoPrice:true}:line));
   const net=useMemo(()=>lines.reduce((sum,line)=>sum+(Number(line.gross)||0)-(Number(line.discount)||0),0),[lines]);
   const taxableBase=net+(Number(values.shippingRevenue)||0);
   const defaultAfterTax=Math.round((taxableBase*1.13+Number.EPSILON)*100)/100;
@@ -62,10 +66,11 @@ export default function ManualSaleEditor({record,onClose,onSaved,addItem=false})
   const save=async event=>{
     event.preventDefault();setBusy(true);setError('');
     try{
-      if(lines.some(line=>line.originalIndex==null&&!line.variantId))throw new Error('Choose the Shopify item and variant for every sale line.');
+      if(lines.some(line=>line.originalIndex==null&&line.entryMode==='catalog'&&!line.variantId))throw new Error('Choose the Shopify item and variant, or switch that line to Custom item.');
+      if(lines.some(line=>line.originalIndex==null&&!line.variantId&&!String(line.title||'').trim()))throw new Error('Enter an item name for every custom sale line.');
       if(reductions.some(line=>line.variantId&&typeof restockChoices[line.index]!=='boolean'))throw new Error('Choose whether each removed item should return to inventory.');
       if(afterTax<taxableBase)throw new Error('After-tax total cannot be lower than the product sales plus shipping charged.');
-      const body={...values,paymentStatus:values.paymentStatus||null,taxes,restockChoices:reductions.filter(line=>line.variantId).map(line=>({index:line.index,restock:restockChoices[line.index]})),lines:lines.map(({unitPrice,unitDiscount,autoPrice,clientKey,...line})=>({...line,quantity:Number(line.quantity),gross:Number(line.gross),discount:Number(line.discount||0),unitCost:Number(line.unitCost||0)}))};
+      const body={...values,paymentStatus:values.paymentStatus||null,taxes,restockChoices:reductions.filter(line=>line.variantId).map(line=>({index:line.index,restock:restockChoices[line.index]})),lines:lines.map(({unitPrice,unitDiscount,autoPrice,clientKey,entryMode,...line})=>({...line,quantity:Number(line.quantity),gross:Number(line.gross),discount:Number(line.discount||0),unitCost:Number(line.unitCost||0)}))};
       if(record)body.expectedUpdatedAt=record.updatedAt;
       const result=await api(`/api/manual-sales${record?`/${record._id}`:''}`,{method:record?'PATCH':'POST',body:JSON.stringify(body)});onSaved(result);
     }catch(error){setError(error.message);}finally{setBusy(false);}
@@ -77,11 +82,18 @@ export default function ManualSaleEditor({record,onClose,onSaved,addItem=false})
       <div className="formgrid"><InputField field={{name:'name',label:'Sale name',required:true}} value={values.name} onChange={value=>change('name',value)}/><InputField field={{name:'date',label:'Sale date',type:'date',required:true}} value={values.date} onChange={value=>change('date',value)}/></div>
       <label className="field"><span>Payment status</span><select value={values.paymentStatus} onChange={event=>change('paymentStatus',event.target.value)}><option value="">Not set</option><option value="paid">Paid</option><option value="unpaid">Unpaid</option></select></label>
       <div className="record-section-heading"><h3>Sale items</h3><button className="secondary" type="button" onClick={()=>setLines([...lines,blankLine()])}><Plus size={14}/>Add item</button></div>
-      <p className="record-help">Choose the exact Shopify product variant sold. New items use their current Shopify cost and are removed from inventory when you save. Existing items retain their saved costs.</p>
+      <p className="record-help">Use a Shopify item when you want inventory and current cost linked automatically, or choose Custom item to enter a sale line manually. Custom items do not change Shopify inventory.</p>
       {lines.map((line,index)=><div className="sale-line-card" key={line.clientKey}><div className="sale-line-heading"><strong>Item {index+1}</strong><button className="icon danger" type="button" aria-label={`Remove item ${index+1}`} disabled={lines.length===1} title={lines.length===1?'Use Cancel / remove sale to remove the last item':'Remove this item; choose inventory return below'} onClick={()=>setLines(lines.filter((_,i)=>i!==index))}><Trash2 size={15}/></button></div>
-        {line.originalIndex==null?<CatalogPicker line={line} onPick={item=>pickVariant(index,item)}/>:<p className="record-help">To replace this item, remove it and use Add item.</p>}
+        {line.originalIndex==null&&<label className="field"><span>Item type</span><select value={line.entryMode} onChange={event=>setEntryMode(index,event.target.value)}><option value="catalog">Shopify product / variant</option><option value="custom">Custom item</option></select></label>}
+        {line.originalIndex==null&&line.entryMode==='catalog'&&<CatalogPicker line={line} onPick={item=>pickVariant(index,item)}/>} 
+        {line.originalIndex==null&&line.entryMode==='custom'&&<div className="formgrid sale-line-grid">
+          <InputField field={{name:'title',label:'Item name',required:true}} value={line.title} onChange={value=>lineChange(index,'title',value)}/>
+          <InputField field={{name:'sku',label:'SKU / reference'}} value={line.sku} onChange={value=>lineChange(index,'sku',value)}/>
+          <InputField field={{name:'unitCost',label:'Unit cost',type:'number',min:0,step:'0.01'}} value={line.unitCost} onChange={value=>lineChange(index,'unitCost',value)}/>
+        </div>}
+        {line.originalIndex!=null&&<p className="record-help">To replace this item, remove it and use Add item.</p>}
         {line.variantId&&<div className="record-help"><strong>{displayName(line)}</strong> · Cost {money(line.unitCost||0)}</div>}
-        {!line.variantId&&line.originalIndex!=null&&<div className="record-help">Legacy manual item: {line.title||'No linked Shopify variant'}. This item is not linked to inventory.</div>}
+        {!line.variantId&&line.originalIndex!=null&&<div className="record-help">Custom item: {line.title||'No item name'}. This item is not linked to Shopify inventory.</div>}
         <div className="formgrid sale-line-grid">{[
           {name:'quantity',label:'Quantity',type:'number',min:1,step:'1',required:true},{name:'gross',label:'Sale amount before tax',type:'number',min:0,required:true},
           {name:'discount',label:'Line discount',type:'number',min:0}
@@ -101,4 +113,3 @@ export default function ManualSaleEditor({record,onClose,onSaved,addItem=false})
     <SaveActions busy={busy} disabled={!access?.ownerAuthenticated} onClose={onClose} label={record?'Save sale changes':'Add manual sale'}/>
   </RecordDialog>;
 }
-
