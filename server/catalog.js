@@ -38,6 +38,7 @@ export function inventoryTotals(rows) {
     missingCosts:0, missingCostStock:0, untracked:0, variants:rows.length, products:new Set(rows.map(row => row.productId)).size};
   for (const row of rows) {
     totals.quantity += Math.max(0, row.quantity || 0);
+    if (row.status === 'DRAFT') continue;
     totals.inventoryValue += row.inventoryValue ?? 0;
     totals.inventoryCost += row.inventoryCost ?? 0;
     totals.totalProfit += row.totalProfit ?? 0;
