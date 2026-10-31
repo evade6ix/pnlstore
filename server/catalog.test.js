@@ -34,6 +34,23 @@ test('missing costs, untracked quantities, negative stock, and zero prices do no
   assert.ok(Math.abs(totals.margin - row().margin) < 0.00001);
 });
 
+test('draft products are excluded from inventory value, cost, and potential gross profit', () => {
+  const active = row();
+  const draft = row({product:{id:'product-draft',title:'Draft product',status:'DRAFT',featuredMedia:null}});
+  const draftMissingCost = row({
+    product:{id:'product-draft-missing',title:'Draft missing cost',status:'DRAFT',featuredMedia:null},
+    inventoryItem:{tracked:true,unitCost:null}
+  });
+  const totals = inventoryTotals([active, draft, draftMissingCost]);
+  assert.equal(totals.inventoryValue, active.inventoryValue);
+  assert.equal(totals.inventoryCost, active.inventoryCost);
+  assert.equal(totals.totalProfit, active.totalProfit);
+  assert.equal(totals.missingCosts, 0);
+  assert.equal(totals.missingCostStock, 0);
+  assert.equal(totals.quantity, 30);
+  assert.ok(Math.abs(totals.margin - active.margin) < 0.00001);
+});
+
 test('costs in another currency are rejected', () => {
   assert.throws(() => row({inventoryItem:{tracked:true,unitCost:{amount:'10',currencyCode:'USD'}}}), /currency/);
 });
