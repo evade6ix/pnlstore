@@ -88,17 +88,16 @@ app.get('/api/shopify-platform-orders/status',asyncRoute(async(req,res)=>{
     Order.countDocuments({source:'shopify'})
   ]);
   const state=record?.value||{};
-  const running=state.state==='running'&&Date.now()-new Date(state.startedAt||0).getTime()<60*60*1000;
   res.set('Cache-Control','no-store');
   res.json({connected:!!session,shop:s,ownerAuthenticated:editingAccess(req,s,session?.scope,process.env.SHOPIFY_CLIENT_SECRET).authenticated,
-    orders,state:{...state,state:orderSyncJob?'running':running?'running':state.state==='running'?'interrupted':state.state||'never'}});
+    orders,state:{...state,state:orderSyncJob?'running':state.state==='running'?'interrupted':state.state||'never'}});
 }));
 app.get('/api/shopify-platform-orders',asyncRoute(async(req,res)=>{
   const filter={source:'shopify'},q=String(req.query.q||'').trim().slice(0,100);
-  if(q){const pattern=q.replace(/[.*+?^${}()|[\]\\]/g,'\\app.post('/api/sync/inventory',');filter.$or=[{name:{$regex:pattern,$options:'i'}},{orderNumber:{$regex:pattern,$options:'i'}},{discountCodes:{$regex:pattern,$options:'i'}},{'lines.sku':{$regex:pattern,$options:'i'}}];}
+  if(q){const pattern=q.replace(/[^a-z0-9 _#-]/gi,c=>'\\'+c);filter.$or=[{name:{$regex:pattern,$options:'i'}},{orderNumber:{$regex:pattern,$options:'i'}},{discountCodes:{$regex:pattern,$options:'i'}},{'lines.sku':{$regex:pattern,$options:'i'}}];}
   const page=Math.min(100000,Math.max(1,Number.parseInt(req.query.page,10)||1)),limit=40;
   const [items,total,totals]=await Promise.all([
-    Order.find(filter).sort({createdAtShopify:-1,_id:-1}).skip((page-1)*limit).limit(limit).lean(),
+    Order.find(filter).select('-raw').sort({createdAtShopify:-1,_id:-1}).skip((page-1)*limit).limit(limit).lean(),
     Order.countDocuments(filter),
     Order.aggregate([{$match:filter},{$group:{_id:null,
       revenue:{$sum:{$add:[{$ifNull:['$netSales',0]},{$ifNull:['$shippingRevenue',0]}]}},
