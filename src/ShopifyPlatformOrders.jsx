@@ -25,21 +25,21 @@ export default function ShopifyPlatformOrders(){
   const [result,setResult]=useState({items:[],total:0,limit:40,summary:{}});
   const [status,setStatus]=useState(null),[selected,setSelected]=useState(null);
   const [values,setValues]=useState({}),[loading,setLoading]=useState(true);
-  const [error,setError]=useState(''),[saving,setSaving]=useState(false),[syncBusy,setSyncBusy]=useState(false);
+  const [error,setError]=useState(''),[formError,setFormError]=useState(''),[saving,setSaving]=useState(false),[syncBusy,setSyncBusy]=useState(false);
   const load=async()=>{try{const r=await api('/api/shopify-platform-orders?q='+encodeURIComponent(query)+'&page='+page);setResult(r);setError('');}catch(e){setError(e.message);}finally{setLoading(false);}};
   const loadStatus=async()=>{try{const s=await api('/api/shopify-platform-orders/status');setStatus(s);}catch(e){setError(e.message);}};
   useEffect(()=>{setLoading(true);const timer=setTimeout(load,180);return()=>clearTimeout(timer);},[query,page]);
   useEffect(()=>{loadStatus();const timer=setInterval(()=>{loadStatus();load();},15000);return()=>clearInterval(timer);},[query,page]);
   const sync=async()=>{setSyncBusy(true);setError('');try{await api('/api/shopify-platform-orders/sync',{method:'POST',body:'{}'});await loadStatus();}catch(e){setError(e.message);}finally{setSyncBusy(false);}};
-  const open=order=>{setSelected(order);setValues(Object.fromEntries([...inputs.map(([key])=>[key,String(order[key]??0)]),['notes',order.notes||'']]));};
+  const open=order=>{setFormError('');setSelected(order);setValues(Object.fromEntries([...inputs.map(([key])=>[key,String(order[key]??0)]),['notes',order.notes||'']]));};
   const close=()=>{if(!saving)setSelected(null);};
-  const save=async e=>{e.preventDefault();setSaving(true);setError('');try{
+  const save=async e=>{e.preventDefault();setSaving(true);setFormError('');try{
     const body=Object.fromEntries(inputs.map(([key])=>[key,Number(values[key])]));
     body.notes=values.notes;body.expectedUpdatedAt=selected.updatedAt;
     const order=await api('/api/orders/'+selected._id,{method:'PATCH',body:JSON.stringify(body)});
     setSelected({...order,financials:financials(order)});
     await load();await loadStatus();setSelected(null);
-  }catch(e){setError(e.message);}finally{setSaving(false);}};
+  }catch(e){setFormError(e.message);}finally{setSaving(false);}};
   const summary=result.summary||{},pages=Math.max(1,Math.ceil(result.total/result.limit));
   const preview=selected?financials({...selected,...values}):null;
   const state=status?.state||{};
@@ -76,7 +76,7 @@ export default function ShopifyPlatformOrders(){
         <div><span>Discount codes</span><strong>{(selected.discountCodes||[]).join(', ')||'None'}</strong></div>
         <div className="platform-revenue-total"><span>Revenue (after discounts and refunds)</span><strong>{money(preview.revenue)}</strong></div>
       </div>
-      <form id="platform-cost-form" onSubmit={save}><h3>Actual variable costs</h3><p className="platform-hint">Save actual charges from shipping labels, your processor and cashback rewards.</p>
+      <form id="platform-cost-form" onSubmit={save}><h3>Actual variable costs</h3>{formError&&<div className="notice" role="alert"><AlertCircle size={16}/><div>{formError}</div></div>}<p className="platform-hint">Save actual charges from shipping labels, your processor and cashback rewards.</p>
         <div className="platform-fields">{inputs.map(([key,label])=><label key={key}><span>{label}</span><div className="platform-money-input"><span>$</span><input type="number" min="0" step="0.01" required disabled={saving||!status?.ownerAuthenticated} value={values[key]??'0'} onChange={e=>setValues(v=>({...v,[key]:e.target.value}))}/></div></label>)}</div>
         <label className="platform-notes"><span>Internal notes</span><textarea rows="3" disabled={saving||!status?.ownerAuthenticated} value={values.notes||''} onChange={e=>setValues(v=>({...v,notes:e.target.value}))} placeholder="Carrier, tracking, cashback details, fees…"/></label>
       </form>
