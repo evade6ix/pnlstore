@@ -64,8 +64,10 @@ function runOrderSync(full=false){
     const session=await Session.findOne({shop:s}).select('scope').lean();
     if(!session)throw new Error('Connect Shopify before importing orders.');
     const key=syncKey(s),record=await Setting.findOne({key}).lean();
-    const began=new Date(),last=record?.value?.lastSuccessfulStart;
-    const since=!full&&last?new Date(new Date(last).getTime()-60*60*1000):null;
+    const began=new Date(),last=record?.value?.lastSuccessfulStart,lastFull=record?.value?.lastFullCompletedAt;
+    // Daily full import catches cashback metafield edits that do not necessarily advance Order.updatedAt.
+    const fullRefresh=full||!last||!lastFull||began.getTime()-new Date(lastFull).getTime()>=24*60*60*1000;
+    const since=!fullRefresh&&last?new Date(new Date(last).getTime()-60*60*1000):null;
     await Setting.updateOne({key},{$set:{'value.state':'running','value.startedAt':began,'value.synced':0,'value.error':null}}, {upsert:true});
     try{
       const synced=await syncOrders(s,{updatedSince:since,onPage:async({count,pages})=>{
@@ -73,7 +75,7 @@ function runOrderSync(full=false){
       }});
       const complete=new Date();
       await Setting.updateOne({key},{$set:{'value.state':'idle','value.lastSuccessfulStart':began,
-        'value.lastCompletedAt':complete,'value.synced':synced,'value.mode':since?'incremental':'full','value.error':null}});
+        'value.lastCompletedAt':complete,'value.synced':synced,'value.mode':since?'incremental':'full','value.error':null,...(fullRefresh?{'value.lastFullCompletedAt':complete}:{})}});
       return {synced,completedAt:complete,mode:since?'incremental':'full'};
     }catch(error){
       await Setting.updateOne({key},{$set:{'value.state':'error','value.error':error.message,'value.lastFailedAt':new Date()}}).catch(()=>{});
