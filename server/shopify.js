@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import {historicalLineCost} from './ledger.js';
+import {importedShopifyFinancials,financialSyncValues} from './shopify-financial-import.js';
 import {Order,Cost,Session} from './models.js';
 const apiVersion=()=>process.env.SHOPIFY_API_VERSION||'2026-10';
 export const normalizeShop=s=>{const v=String(s||'').trim().toLowerCase().replace(/^https?:\/\//,'').replace(/\/$/,'');return /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(v)?v:null};
@@ -24,7 +25,9 @@ export async function persistOrder(node,attempt=0){
   const beforeReturns=money(node.subtotalPriceSet?.shopMoney);
   const returns=Math.max(0,beforeReturns-net);
   const discounts=money((node.currentTotalDiscountsSet||node.totalDiscountsSet)?.shopMoney);
+  const imported=importedShopifyFinancials(node);
   const values={
+    ...financialSyncValues(existing,imported),
     orderNumber:String(node.legacyResourceId||node.name),name:node.name,source:'shopify',
     createdAtShopify:created,currency:node.currencyCode,
     financialStatus:node.displayFinancialStatus,fulfillmentStatus:node.displayFulfillmentStatus,
@@ -42,12 +45,12 @@ export async function persistOrder(node,attempt=0){
   if(!saved){if(attempt<3)return persistOrder(node,attempt+1);throw new Error('Order changed during sync; retry the sync.');}
   return saved;
 }
-const ORDER_FIELDS=`id legacyResourceId name createdAt updatedAt currencyCode discountCodes displayFinancialStatus displayFulfillmentStatus subtotalPriceSet{shopMoney{amount}} currentSubtotalPriceSet{shopMoney{amount currencyCode}} currentTotalDiscountsSet{shopMoney{amount}} currentShippingPriceSet{shopMoney{amount}} currentTotalTaxSet{shopMoney{amount}} currentTotalPriceSet{shopMoney{amount}} lineItems(first:100){edges{node{id title variantTitle sku quantity currentQuantity originalTotalSet{shopMoney{amount}} totalDiscountSet{shopMoney{amount}} product{id} variant{id sku inventoryItem{unitCost{amount currencyCode}}}}}}`;
+const ORDER_FIELDS=`id legacyResourceId name createdAt updatedAt currencyCode presentmentCurrencyCode discountCodes displayFinancialStatus displayFulfillmentStatus subtotalPriceSet{shopMoney{amount}} currentSubtotalPriceSet{shopMoney{amount currencyCode}} currentTotalDiscountsSet{shopMoney{amount}} currentShippingPriceSet{shopMoney{amount}} currentTotalTaxSet{shopMoney{amount}} currentTotalPriceSet{shopMoney{amount currencyCode} presentmentMoney{amount currencyCode}} metafield(namespace:"dollar-cashback",key:"store-credit-given"){namespace key value} transactions(first:50){id kind status gateway settlementCurrency settlementCurrencyRate amountSet{shopMoney{amount currencyCode} presentmentMoney{amount currencyCode}} fees{type amount{amount currencyCode} taxAmount{amount currencyCode}}} lineItems(first:100){edges{node{id title variantTitle sku quantity currentQuantity originalTotalSet{shopMoney{amount}} totalDiscountSet{shopMoney{amount}} product{id} variant{id sku inventoryItem{unitCost{amount currencyCode}}}}}}`;
 export async function syncOrders(shop,{updatedSince=null,onPage=()=>{}}={}){
   let after=null,count=0,pages=0;
   const query=updatedSince?`updated_at:>=${new Date(updatedSince).toISOString()}`:null;
   do{
-    const d=await gql(shop,`query($after:String,$query:String){orders(first:100,after:$after,sortKey:UPDATED_AT,query:$query){pageInfo{hasNextPage endCursor}edges{node{${ORDER_FIELDS}}}}}`,{after,query});
+    const d=await gql(shop,`query($after:String,$query:String){orders(first:25,after:$after,sortKey:UPDATED_AT,query:$query){pageInfo{hasNextPage endCursor}edges{node{${ORDER_FIELDS}}}}}`,{after,query});
     for(const e of d.orders.edges){await persistOrder(e.node);count++;}
     pages++;
     await onPage({count,pages});
