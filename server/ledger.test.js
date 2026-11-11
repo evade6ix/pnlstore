@@ -47,6 +47,9 @@ test('order cost edits preserve other imported fields and snapshot sources until
   const result=orderCostValues(current,{lineCosts:[{index:0,unitCost:4}],shippingCost:7,notes:'Corrected cost',netSales:9999});
   assert.equal(result.cogs,12);assert.equal(result.lines[0].costSource,'order-edit');assert.equal(result.netSales,undefined);
   assert.equal(result.lines[0].title,'Item');
+  assert.equal(orderCostValues(current,{cashbackCost:7}).cashbackCost,7);
+  assert.equal(orderCostValues(current,{cashbackCost:7}).costsReviewed,true);
+  assert.throws(()=>orderCostValues(current,{cashbackCost:-1}),/zero or more/);
   assert.deepEqual(historicalLineCost({lines:result.lines},'line-1',99,'shopify'),{unitCost:4,costSource:'order-edit'});
   assert.deepEqual(historicalLineCost({lines:[{shopifyLineId:'line-1',unitCost:0,costSource:'order-edit'}]},'line-1',99,'shopify'),{unitCost:0,costSource:'order-edit'});
 });

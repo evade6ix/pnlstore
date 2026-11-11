@@ -1,9 +1,10 @@
 import 'dotenv/config';import express from 'express';import mongoose from 'mongoose';import helmet from 'helmet';import compression from 'compression';import crypto from 'crypto';import path from 'path';import {fileURLToPath} from 'url';import {Order,Cost,Expense,Purchase,Session,Catalog,Setting,WebhookJob} from './models.js';import {normalizeShop,verifyHmac,syncOrders,verifyWebhook,persistOrder,gql,ORDER_FIELDS} from './shopify.js';
 import {createCatalogSync,inventoryRow,inventoryTotals,CATALOG_INTERVAL_MS} from './catalog.js';
 import {createInventoryEditor,editError} from './inventory-edit.js';
-import {WRITE_SCOPES,safeEqual,cookieValue,ownerToken,editingAccess,refreshGrantedScopes,editingReturnUrl} from './owner-auth.js';
+import {WRITE_SCOPES,safeEqual,cookieValue,ownerToken,verifyOwnerToken,editingAccess,refreshGrantedScopes,editingReturnUrl} from './owner-auth.js';
 import {createCatalogWebhooks,validWebhook} from './catalog-webhooks.js';
 import {createLedgerRouter} from './ledger.js';
+import {orderFinancials} from './order-finance.js';
 const syncCatalog=createCatalogSync({gql,Catalog,Setting});
 const inventoryEditor=createInventoryEditor({gql,Catalog,syncCatalog});
 const catalogWebhooks=createCatalogWebhooks({gql,Catalog,Setting,WebhookJob,syncCatalog,appUrl:process.env.SHOPIFY_APP_URL});
@@ -32,6 +33,7 @@ app.get('/auth/callback',asyncRoute(async(req,res)=>{
   await Session.findOneAndUpdate({shop:s},{$set:{accessToken:t.access_token,scope:t.scope,installedAt:new Date()}},{upsert:true});
   res.cookie('pnl_owner',ownerToken(s,process.env.SHOPIFY_CLIENT_SECRET),{...cookieOptions,maxAge:12*60*60*1000});
   syncCatalog(s).catch(error=>console.error('Catalog sync:',error.message));
+  runOrderSync().catch(error=>console.error('Orders sync after OAuth:',error.message));
   catalogWebhooks.ensure(s).catch(error=>console.error('Catalog webhooks:',error.message));
   let grantedScope=t.scope;
   try{grantedScope=await refreshGrantedScopes(s,{gql,Session});}catch(error){console.error('Permission check:',error.message);}
@@ -49,7 +51,81 @@ app.post('/webhooks/orders',express.raw({type:'application/json'}),asyncRoute(as
 app.use(express.json({limit:'2mb'}));
 app.use('/api',createLedgerRouter({Order,Expense,Purchase,Cost,shop,secret:process.env.SHOPIFY_CLIENT_SECRET,appUrl:process.env.SHOPIFY_APP_URL}));
 app.get('/api/status',asyncRoute(async(req,res)=>{const session=await Session.findOne({shop:shop()}).lean();res.json({connected:!!session,shop:shop(),scope:session?.scope||'',orders:await Order.countDocuments(),ownerAuthenticated:editingAccess(req,shop(),session?.scope,process.env.SHOPIFY_CLIENT_SECRET).authenticated,authUrl:`/auth?shop=${shop()}`});}));
-app.post('/api/sync',asyncRoute(async(req,res)=>{const inventory=await syncCatalog(shop());res.json({synced:await syncOrders(shop()),inventory});}));
+app.post('/api/sync',asyncRoute(async(req,res)=>{const inventory=await syncCatalog(shop());const orders=await runOrderSync(true);res.json({synced:orders?.synced??0,inventory});}));
+
+const ORDERS_INTERVAL_MS=15*60*1000;
+const syncKey=s=>`shopifyOrders:${s}`;
+let orderSyncJob=null;
+function runOrderSync(full=false){
+  if(orderSyncJob)return orderSyncJob;
+  orderSyncJob=(async()=>{
+    const s=shop();
+    if(!s)throw new Error('Set SHOPIFY_SHOP before syncing orders.');
+    const session=await Session.findOne({shop:s}).select('scope').lean();
+    if(!session)throw new Error('Connect Shopify before importing orders.');
+    const key=syncKey(s),record=await Setting.findOne({key}).lean();
+    const began=new Date(),last=record?.value?.lastSuccessfulStart;
+    const since=!full&&last?new Date(new Date(last).getTime()-60*60*1000):null;
+    await Setting.updateOne({key},{$set:{'value.state':'running','value.startedAt':began,'value.synced':0,'value.error':null}}, {upsert:true});
+    try{
+      const synced=await syncOrders(s,{updatedSince:since,onPage:async({count,pages})=>{
+        await Setting.updateOne({key},{$set:{'value.synced':count,'value.pages':pages}});
+      }});
+      const complete=new Date();
+      await Setting.updateOne({key},{$set:{'value.state':'idle','value.lastSuccessfulStart':began,
+        'value.lastCompletedAt':complete,'value.synced':synced,'value.mode':since?'incremental':'full','value.error':null}});
+      return {synced,completedAt:complete,mode:since?'incremental':'full'};
+    }catch(error){
+      await Setting.updateOne({key},{$set:{'value.state':'error','value.error':error.message,'value.lastFailedAt':new Date()}}).catch(()=>{});
+      throw error;
+    }
+  })().finally(()=>{orderSyncJob=null;});
+  return orderSyncJob;
+}
+app.get('/api/shopify-platform-orders/status',asyncRoute(async(req,res)=>{
+  const s=shop(),[record,session,orders]=await Promise.all([
+    Setting.findOne({key:syncKey(s)}).lean(),Session.findOne({shop:s}).select('scope').lean(),
+    Order.countDocuments({source:'shopify'})
+  ]);
+  const state=record?.value||{};
+  res.set('Cache-Control','no-store');
+  res.json({connected:!!session,shop:s,ownerAuthenticated:editingAccess(req,s,session?.scope,process.env.SHOPIFY_CLIENT_SECRET).authenticated,
+    orders,state:{...state,state:orderSyncJob?'running':state.state==='running'?'interrupted':state.state||'never'}});
+}));
+app.get('/api/shopify-platform-orders',asyncRoute(async(req,res)=>{
+  const filter={source:'shopify'},q=String(req.query.q||'').trim().slice(0,100);
+  if(q){const pattern=q.replace(/[^a-z0-9 _#-]/gi,c=>'\\'+c);filter.$or=[{name:{$regex:pattern,$options:'i'}},{orderNumber:{$regex:pattern,$options:'i'}},{discountCodes:{$regex:pattern,$options:'i'}},{'lines.sku':{$regex:pattern,$options:'i'}}];}
+  const page=Math.min(100000,Math.max(1,Number.parseInt(req.query.page,10)||1)),limit=40;
+  const [items,total,totals]=await Promise.all([
+    Order.find(filter).select('-raw').sort({createdAtShopify:-1,_id:-1}).skip((page-1)*limit).limit(limit).lean(),
+    Order.countDocuments(filter),
+    Order.aggregate([{$match:filter},{$group:{_id:null,
+      revenue:{$sum:{$add:[{$ifNull:['$netSales',0]},{$ifNull:['$shippingRevenue',0]}]}},
+      cogs:{$sum:{$ifNull:['$cogs',0]}},shippingCost:{$sum:{$ifNull:['$shippingCost',0]}},
+      materialCost:{$sum:{$ifNull:['$materialCost',0]}},paymentFees:{$sum:{$ifNull:['$paymentFees',0]}},
+      cashbackCost:{$sum:{$ifNull:['$cashbackCost',0]}},otherVariableCost:{$sum:{$ifNull:['$otherVariableCost',0]}},
+      discounts:{$sum:{$ifNull:['$discounts',0]}},
+      needsReview:{$sum:{$cond:[{$eq:['$costsReviewed',true]},0,1]}}
+    }}])
+  ]);
+  const t=totals[0]||{},takeHome=(t.revenue||0)-(t.shippingCost||0)-(t.materialCost||0)-(t.paymentFees||0)-(t.cashbackCost||0)-(t.otherVariableCost||0);
+  res.set('Cache-Control','no-store');
+  res.json({items:items.map(o=>({...o,financials:orderFinancials(o)})),total,page,limit,
+    summary:{revenue:t.revenue||0,discounts:t.discounts||0,cashback:t.cashbackCost||0,
+      takeHome,profit:takeHome-(t.cogs||0),needsReview:t.needsReview||0}});
+}));
+app.post('/api/shopify-platform-orders/sync',asyncRoute(async(req,res)=>{
+  const s=shop(),session=await Session.findOne({shop:s}).select('scope').lean();
+  if(!verifyOwnerToken(cookieValue(req,'pnl_owner'),s,process.env.SHOPIFY_CLIENT_SECRET))
+    return res.status(401).json({error:'Sign in through Shopify before syncing orders.',authUrl:`/auth?shop=${s}`});
+  if(req.get('origin')!==new URL(process.env.SHOPIFY_APP_URL).origin||!req.is('application/json'))
+    return res.status(403).json({error:'Sync orders from this workspace only.'});
+  if(!session)return res.status(409).json({error:'Connect Shopify first.'});
+  const alreadyRunning=!!orderSyncJob;
+  if(!alreadyRunning)runOrderSync(true).catch(error=>console.error('Manual order sync:',error.message));
+  res.status(202).json({started:!alreadyRunning,alreadyRunning});
+}));
+
 app.post('/api/sync/inventory',asyncRoute(async(req,res)=>res.json(await syncCatalog(shop()))));
 app.get('/api/inventory',asyncRoute(async(req,res)=>{
   const s=shop(),records=await Catalog.find({shop:s}).sort({title:1,variantTitle:1}).lean();
@@ -99,10 +175,10 @@ const dateParts=(d,timeZone)=>Object.fromEntries(new Intl.DateTimeFormat('en-CA'
 const tzOffset=(d,timeZone)=>{const p=dateParts(d,timeZone);return Date.UTC(+p.year,+p.month-1,+p.day,+p.hour,+p.minute,+p.second)-d.getTime()};
 const localToUtc=(dateStr,end=false)=>{const [y,m,d]=dateStr.split('-').map(Number),base=Date.UTC(y,m-1,d,end?23:0,end?59:0,end?59:0,end?999:0);let guess=new Date(base);for(let i=0;i<2;i++)guess=new Date(base-tzOffset(guess,STORE_TZ));return guess};
 const range=q=>{const endText=q.end||new Date().toISOString().slice(0,10);const endDay=new Date(`${endText}T00:00:00.000Z`);const startText=q.start||`${endDay.getUTCFullYear()}-${String(endDay.getUTCMonth()+1).padStart(2,'0')}-01`;return{startText,endText,shopStart:localToUtc(startText),shopEnd:localToUtc(endText,true),ledgerStart:new Date(`${startText}T00:00:00.000Z`),ledgerEnd:new Date(`${endText}T23:59:59.999Z`)}};
-app.get('/api/dashboard',asyncRoute(async(req,res)=>{const r=range(req.query),orders=await Order.find({createdAtShopify:{$gte:r.shopStart,$lte:r.shopEnd}}).lean(),expenses=await Expense.find({date:{$gte:r.ledgerStart,$lte:r.ledgerEnd}}).lean();const sum=(k)=>orders.reduce((a,o)=>a+(o[k]||0),0),expenseTotal=expenses.reduce((a,e)=>a+e.amount,0);const revenue=sum('netSales')+sum('shippingRevenue'),cogs=sum('cogs'),variable=sum('shippingCost')+sum('paymentFees')+sum('materialCost')+sum('otherVariableCost'),grossProfit=revenue-cogs,netProfit=grossProfit-variable-expenseTotal;const daily={};for(const o of orders){const p=dateParts(new Date(o.createdAtShopify),STORE_TZ),k=`${p.year}-${p.month}-${p.day}`;daily[k]??={date:k,revenue:0,profit:0};daily[k].revenue+=(o.netSales||0)+(o.shippingRevenue||0);daily[k].profit+=(o.netSales||0)+(o.shippingRevenue||0)-(o.cogs||0)-(o.shippingCost||0)-(o.paymentFees||0)-(o.materialCost||0)-(o.otherVariableCost||0);}for(const e of expenses){const k=new Date(e.date).toISOString().slice(0,10);daily[k]??={date:k,revenue:0,profit:0};daily[k].profit-=e.amount;}res.json({range:{start:r.startText,end:r.endText},kpis:{revenue,grossSales:sum('grossSales'),discounts:sum('discounts'),returns:sum('returns'),cogs,grossProfit,variableCosts:variable,operatingExpenses:expenseTotal,netProfit,orders:orders.length,aov:orders.length?revenue/orders.length:0,grossMargin:revenue?grossProfit/revenue*100:0,netMargin:revenue?netProfit/revenue*100:0},daily:Object.values(daily).sort((a,b)=>a.date.localeCompare(b.date)),recent:orders.sort((a,b)=>new Date(b.createdAtShopify)-new Date(a.createdAtShopify)).slice(0,8)});}));
+app.get('/api/dashboard',asyncRoute(async(req,res)=>{const r=range(req.query),orders=await Order.find({createdAtShopify:{$gte:r.shopStart,$lte:r.shopEnd}}).lean(),expenses=await Expense.find({date:{$gte:r.ledgerStart,$lte:r.ledgerEnd}}).lean();const sum=(k)=>orders.reduce((a,o)=>a+(o[k]||0),0),expenseTotal=expenses.reduce((a,e)=>a+e.amount,0);const revenue=sum('netSales')+sum('shippingRevenue'),cogs=sum('cogs'),variable=sum('shippingCost')+sum('paymentFees')+sum('materialCost')+sum('otherVariableCost')+sum('cashbackCost'),grossProfit=revenue-cogs,netProfit=grossProfit-variable-expenseTotal;const daily={};for(const o of orders){const p=dateParts(new Date(o.createdAtShopify),STORE_TZ),k=`${p.year}-${p.month}-${p.day}`;daily[k]??={date:k,revenue:0,profit:0};daily[k].revenue+=(o.netSales||0)+(o.shippingRevenue||0);daily[k].profit+=(o.netSales||0)+(o.shippingRevenue||0)-(o.cogs||0)-(o.shippingCost||0)-(o.paymentFees||0)-(o.materialCost||0)-(o.otherVariableCost||0)-(o.cashbackCost||0);}for(const e of expenses){const k=new Date(e.date).toISOString().slice(0,10);daily[k]??={date:k,revenue:0,profit:0};daily[k].profit-=e.amount;}res.json({range:{start:r.startText,end:r.endText},kpis:{revenue,grossSales:sum('grossSales'),discounts:sum('discounts'),returns:sum('returns'),cogs,grossProfit,variableCosts:variable,operatingExpenses:expenseTotal,netProfit,orders:orders.length,aov:orders.length?revenue/orders.length:0,grossMargin:revenue?grossProfit/revenue*100:0,netMargin:revenue?netProfit/revenue*100:0},daily:Object.values(daily).sort((a,b)=>a.date.localeCompare(b.date)),recent:orders.sort((a,b)=>new Date(b.createdAtShopify)-new Date(a.createdAtShopify)).slice(0,8)});}));
 app.get('/api/orders',asyncRoute(async(req,res)=>{const filter={};if(req.query.q)filter.$or=[{name:{$regex:req.query.q,$options:'i'}},{orderNumber:{$regex:req.query.q,$options:'i'}},{'lines.sku':{$regex:req.query.q,$options:'i'}}];const page=Math.max(1,+req.query.page||1),limit=50;res.json({items:await Order.find(filter).sort({createdAtShopify:-1}).skip((page-1)*limit).limit(limit).lean(),total:await Order.countDocuments(filter),page,limit});}));
 app.get('/api/orders/:id',asyncRoute(async(req,res)=>{const item=await Order.findById(req.params.id).lean();if(!item)return res.sendStatus(404);res.json(item);}));
-app.get('/api/pnl',asyncRoute(async(req,res)=>{const r=range(req.query),orders=await Order.find({createdAtShopify:{$gte:r.shopStart,$lte:r.shopEnd}}).lean(),expenses=await Expense.find({date:{$gte:r.ledgerStart,$lte:r.ledgerEnd}}).lean(),purchases=await Purchase.find({date:{$gte:r.ledgerStart,$lte:r.ledgerEnd}}).lean();const s=k=>orders.reduce((a,o)=>a+(o[k]||0),0),ps=k=>purchases.reduce((a,p)=>a+(p[k]||0),0);const rows=[['Gross sales',s('grossSales')],['Discounts',-s('discounts')],['Returns',-s('returns')],['Net product sales',s('netSales')],['Shipping revenue',s('shippingRevenue')],['Total revenue',s('netSales')+s('shippingRevenue')],['Cost of goods sold',-s('cogs')],['Gross profit',s('netSales')+s('shippingRevenue')-s('cogs')],['Shipping expense',-s('shippingCost')],['Payment processing',-s('paymentFees')],['Packing materials',-s('materialCost')],['Other variable costs',-s('otherVariableCost')]];const cats={};expenses.forEach(e=>cats[e.category||'Other']=(cats[e.category||'Other']||0)+e.amount);Object.entries(cats).forEach(([k,v])=>rows.push([k,-v]));const net=s('netSales')+s('shippingRevenue')-s('cogs')-s('shippingCost')-s('paymentFees')-s('materialCost')-s('otherVariableCost')-expenses.reduce((a,e)=>a+e.amount,0);rows.push(['Net profit',net]);const purchaseRows=[['PO / inventory purchases',ps('total')],['Inbound purchase shipping',ps('shipping')],['Duties & import costs',ps('duties')],['Purchase taxes',ps('tax')],['Tracked purchase outlay',ps('total')+ps('shipping')+ps('duties')+ps('tax')]];res.json({start:r.startText,end:r.endText,rows,net,purchaseRows,purchaseCount:purchases.length});}));
+app.get('/api/pnl',asyncRoute(async(req,res)=>{const r=range(req.query),orders=await Order.find({createdAtShopify:{$gte:r.shopStart,$lte:r.shopEnd}}).lean(),expenses=await Expense.find({date:{$gte:r.ledgerStart,$lte:r.ledgerEnd}}).lean(),purchases=await Purchase.find({date:{$gte:r.ledgerStart,$lte:r.ledgerEnd}}).lean();const s=k=>orders.reduce((a,o)=>a+(o[k]||0),0),ps=k=>purchases.reduce((a,p)=>a+(p[k]||0),0);const rows=[['Gross sales',s('grossSales')],['Discounts',-s('discounts')],['Returns',-s('returns')],['Net product sales',s('netSales')],['Shipping revenue',s('shippingRevenue')],['Total revenue',s('netSales')+s('shippingRevenue')],['Cost of goods sold',-s('cogs')],['Gross profit',s('netSales')+s('shippingRevenue')-s('cogs')],['Shipping expense',-s('shippingCost')],['Payment processing',-s('paymentFees')],['Packing materials',-s('materialCost')],['Other variable costs',-s('otherVariableCost')],['Cashback issued',-s('cashbackCost')]];const cats={};expenses.forEach(e=>cats[e.category||'Other']=(cats[e.category||'Other']||0)+e.amount);Object.entries(cats).forEach(([k,v])=>rows.push([k,-v]));const net=s('netSales')+s('shippingRevenue')-s('cogs')-s('shippingCost')-s('paymentFees')-s('materialCost')-s('otherVariableCost')-s('cashbackCost')-expenses.reduce((a,e)=>a+e.amount,0);rows.push(['Net profit',net]);const purchaseRows=[['PO / inventory purchases',ps('total')],['Inbound purchase shipping',ps('shipping')],['Duties & import costs',ps('duties')],['Purchase taxes',ps('tax')],['Tracked purchase outlay',ps('total')+ps('shipping')+ps('duties')+ps('tax')]];res.json({start:r.startText,end:r.endText,rows,net,purchaseRows,purchaseCount:purchases.length});}));
 const __dirname=path.dirname(fileURLToPath(import.meta.url)),dist=path.join(__dirname,'../dist');if(process.env.NODE_ENV==='production'){app.use(express.static(dist));app.use((req,res,next)=>{if(req.method!=='GET'||req.path.startsWith('/api/')||req.path.startsWith('/auth')||req.path.startsWith('/webhooks/')||req.path==='/health')return next();res.sendFile(path.join(dist,'index.html'));});}app.use((err,req,res,next)=>{console.error(err);res.status(err.status||500).json({error:err.message||'Server error'});});
 await mongoose.connect(process.env.MONGODB_URI);
 await WebhookJob.init();
@@ -111,6 +187,8 @@ const maintainWebhooks=async()=>{const s=shop();if(s&&await Session.exists({shop
 const initializeCatalog=async()=>{try{await refreshCatalog();}finally{await maintainWebhooks();}};
 initializeCatalog().catch(error=>console.error('Catalog initialization:',error.message));
 setInterval(()=>refreshCatalog().catch(error=>console.error('Catalog sync:',error.message)),CATALOG_INTERVAL_MS).unref();
+ runOrderSync().catch(error=>console.error('Startup orders sync:',error.message));
+ setInterval(()=>runOrderSync().catch(error=>console.error('Orders sync:',error.message)),ORDERS_INTERVAL_MS).unref();
 setInterval(()=>maintainWebhooks().catch(error=>console.error('Catalog webhooks:',error.message)),CATALOG_INTERVAL_MS).unref();
 setInterval(()=>{const s=shop();if(s)catalogWebhooks.pump(s).catch(error=>console.error('Catalog webhook worker:',error.message));},2000).unref();
 app.listen(port,'0.0.0.0',()=>console.log(`P&L server listening on ${port}`));

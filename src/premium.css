@@ -339,3 +339,65 @@ dialog form{padding:24px}
 @media(prefers-reduced-motion:reduce){
   *,*::before,*::after{scroll-behavior:auto!important;animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}
 }
+
+
+/* Shopify Platform Orders — dedicated local order profitability workspace */
+.platform-heading{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.platform-label{border:1px solid #d9e3f7;background:#eff4ff;color:#3d5d9d;padding:4px 9px;border-radius:99px;font-size:10px;font-weight:750;letter-spacing:.025em}
+.platform-state{display:inline-flex;align-items:center;gap:6px;border:1px solid #e4e7ec;background:#fff;color:#606b7e;border-radius:99px;padding:8px 11px;font-size:11px;font-weight:650;white-space:nowrap}
+.platform-state.active{color:#3157b3;background:#eef3ff;border-color:#dce6ff}
+.platform-state.error{color:#b42318;background:#fef3f2;border-color:#fecdca}
+.platform-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:16px}
+.platform-kpi{background:#fff;border:1px solid var(--saas-border);border-radius:12px;padding:19px 20px;box-shadow:var(--saas-shadow-xs);display:flex;flex-direction:column;gap:7px}
+.platform-kpi>span{font-size:12px;font-weight:650;color:#667085}
+.platform-kpi>strong{font-size:25px;line-height:1.35;letter-spacing:-.04em;font-weight:750;white-space:nowrap}
+.platform-kpi>small{font-size:11px;line-height:1.5;color:#98a2b3}
+.platform-banner{border:1px solid #e2e8f4;border-radius:10px;background:linear-gradient(105deg,#f8faff,#fff);display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;margin-bottom:18px;font-size:12px;color:#667085}
+.platform-banner strong{color:#344054}
+.platform-banner>span{font-size:11px}
+.platform-table{min-width:1060px}
+.platform-table th{white-space:nowrap}
+.platform-table td{vertical-align:middle}
+.platform-row-link{border:none;background:none!important;box-shadow:none!important;padding:0;min-height:0;color:#315fc7!important;text-decoration:none;text-align:left;transform:none!important}
+.platform-row-link strong{font-size:13px;color:inherit}
+.platform-row-link:hover{text-decoration:underline;box-shadow:none!important}
+.platform-row-meta{margin-top:5px;font-size:10px}
+.platform-reviewed{color:#067647;font-weight:650}
+.platform-unreviewed{color:#b54708;font-weight:650}
+.platform-code{font-size:11px;color:#344054;font-weight:650;overflow-wrap:anywhere}
+.platform-edit{border:1px solid #e4e7ec;background:#fff!important;color:#667085!important;width:28px;height:28px;min-height:28px;padding:0;border-radius:8px;box-shadow:none!important}
+.platform-edit:hover{background:#f1f4ff!important}
+.platform-disclaimer{color:#667085;font-size:11px;line-height:1.5;margin-top:12px}
+.platform-overlay{position:fixed;inset:0;background:rgba(9,15,29,.52);display:flex;justify-content:flex-end;z-index:150;backdrop-filter:blur(3px)}
+.platform-drawer{width:min(560px,100%);height:100%;background:#fff;box-shadow:-18px 0 70px rgba(9,15,29,.2);display:flex;flex-direction:column;overflow:hidden;animation:platformSlide .2s ease-out}
+@keyframes platformSlide{from{transform:translateX(25px);opacity:.7}to{transform:translateX(0);opacity:1}}
+.platform-drawer-head{border-bottom:1px solid #e6eaf0;padding:23px 28px;display:flex;align-items:start;justify-content:space-between;gap:12px}
+.platform-drawer-head h2{font-size:22px;letter-spacing:-.035em;margin:3px 0 7px;color:#101828}
+.platform-drawer-head p{font-size:12px;color:#667085;margin:0}
+.platform-eyebrow{font-size:10px;color:#6471a8;letter-spacing:.12em;font-weight:800}
+.platform-drawer-head button{width:34px;padding:0;min-height:34px}
+.platform-scroll{padding:22px 28px;overflow:auto;flex:1}
+.platform-revenue-stack,.platform-breakdown{background:#fafbfd;border:1px solid #e8ecf3;border-radius:11px;padding:15px 17px}
+.platform-revenue-stack>div,.platform-breakdown>div{display:flex;justify-content:space-between;gap:12px;padding:7px 0;font-size:12px;line-height:1.45}
+.platform-revenue-stack span,.platform-breakdown span{color:#667085}
+.platform-revenue-stack strong,.platform-breakdown strong{color:#344054;text-align:right}
+.platform-revenue-stack .platform-revenue-total,.platform-breakdown .platform-profit{border-top:1px solid #dce2eb;margin-top:8px;padding-top:14px;font-size:14px}
+.platform-revenue-total span,.platform-profit span{color:#101828!important;font-weight:750}
+.platform-revenue-total strong,.platform-profit strong{color:#101828;font-weight:800;font-size:17px}
+.platform-scroll form h3{font-size:14px;margin:23px 0 5px}
+.platform-hint{font-size:11px;color:#667085;line-height:1.5;margin:0 0 14px}
+.platform-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.platform-fields label>span,.platform-notes>span{display:block;font-size:11px;color:#475467;font-weight:650;margin-bottom:6px}
+.platform-money-input{height:39px;display:flex;align-items:center;border:1px solid #d0d5dd;border-radius:8px;background:#fff;overflow:hidden}
+.platform-money-input>span{padding-left:12px;color:#98a2b3;font-size:13px}
+.platform-money-input input{width:100%;height:100%;padding:8px 11px;border:none;outline:none;background:transparent;font-size:13px;color:#101828}
+.platform-money-input:focus-within{border-color:#6a84ff;box-shadow:0 0 0 3px rgba(79,107,255,.1)}
+.platform-notes{display:block;margin:14px 0 22px}
+.platform-notes textarea{width:100%;padding:11px 12px;border:1px solid #d0d5dd;border-radius:8px;resize:vertical;font-size:12px;color:#344054}
+.platform-breakdown{background:#f7faff;border-color:#dce6ff}
+.platform-breakdown small{display:block;text-align:right;color:#667085;font-size:11px;margin-top:5px}
+.platform-detail-link{font-size:12px;text-decoration:none;display:inline-flex;align-items:center;gap:7px;color:#335ec6;font-weight:650;margin:18px 0}
+.platform-detail-link:hover{text-decoration:underline}
+.platform-drawer-footer{border-top:1px solid #e6eaf0;padding:16px 28px;display:flex;justify-content:flex-end;gap:10px;box-shadow:0 -6px 25px rgba(0,0,0,.03)}
+@media(max-width:1240px){.platform-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.platform-banner{align-items:start;flex-direction:column}}
+@media(max-width:760px){.platform-kpis{grid-template-columns:1fr}.platform-banner{font-size:11px}.platform-drawer-head,.platform-scroll{padding:18px}.platform-fields{grid-template-columns:1fr}.platform-drawer-footer{padding:13px 18px}.platform-heading h1{font-size:23px}}
